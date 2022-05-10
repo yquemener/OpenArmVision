@@ -1,9 +1,9 @@
 import torch
 import PyQt5
 from PyQt5 import uic
-from PyQt5.QtCore import QTimer, QRect, QRectF, QStringListModel, QAbstractListModel
+from PyQt5.QtCore import QTimer, QRect, QRectF, QStringListModel, QAbstractListModel, QDir, QItemSelectionModel
 from PyQt5.QtGui import QImage, QPixmap, QColor
-from PyQt5.QtWidgets import QApplication, QGraphicsScene, QGraphicsView
+from PyQt5.QtWidgets import QApplication, QGraphicsScene, QGraphicsView, QFileDialog, QFileSystemModel
 import cv2
 import numpy as np
 from PIL import Image
@@ -127,6 +127,7 @@ class App(QApplication):
         self.form = Form()
         self.form.setupUi(self.window)
         self.form.splitter.setSizes([400, 200])
+        self.form.splitter_video.setSizes([400, 200])
 
         self.form.imageView.mousePressEvent = self.imageView_onclick
 
@@ -138,6 +139,8 @@ class App(QApplication):
         self.form.zoomedView.setScene(self.scene)
         self.form.zoomedView.scale(10,10)
         self.poi_lines = list()
+        self.current_image_browser_dir = None
+        self.current_image_browser_file = None
 
         self.model = None
         self.current_yolo_results = list()
@@ -150,8 +153,32 @@ class App(QApplication):
         self.form.yoloThresholdSlider.valueChanged.connect(self.change_yolo_threshold)
         self.form.buttonStartVideo.clicked.connect(self.start_video)
         self.form.enableYOLO.clicked.connect(self.enable_yolo)
+        self.form.selectDirImageButton.clicked.connect(self.set_image_browser_directory)
         # self.form.imageView.clicked.connect(self.imageView_onclick)
         self.window.show()
+
+    def image_browser_select(self, index):
+        self.current_image_browser_file=index.data()
+        self.update_image_view()
+
+    def update_image_view(self):
+        print(dir)
+        if self.current_image_browser_dir and self.current_image_browser_file:
+            fullname = self.current_image_browser_dir + "/" + self.current_image_browser_file
+            self.background_image_item.setPixmap(QPixmap(fullname))
+
+    def set_image_browser_directory(self):
+        dir = QFileDialog.getExistingDirectory(caption="Images directory", directory=".")
+        print(dir)
+        self.current_image_browser_dir=dir
+        self.form.labelImageDirectory.setText(dir)
+        self.form.labelImageDirectory.setToolTip(dir)
+        browse_image_model = QFileSystemModel()
+        # browse_image_model.setFilter(QDir.Filters("*"))
+        browse_image_model.setRootPath(dir)
+        self.form.BrowseImageList.setModel(browse_image_model)
+        self.form.BrowseImageList.setRootIndex(browse_image_model.index(dir))
+        self.form.BrowseImageList.selectionModel().currentChanged.connect(self.image_browser_select)
 
     def start_video(self):
         ind = self.form.videoIndex.text()
