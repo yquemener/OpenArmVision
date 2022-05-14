@@ -3,7 +3,8 @@ import PyQt5
 from PyQt5 import uic
 from PyQt5.QtCore import QTimer, QRect, QRectF, QStringListModel, QAbstractListModel, QDir, QItemSelectionModel
 from PyQt5.QtGui import QImage, QPixmap, QColor
-from PyQt5.QtWidgets import QApplication, QGraphicsScene, QGraphicsView, QFileDialog, QFileSystemModel
+from PyQt5.QtWidgets import QApplication, QGraphicsScene, QGraphicsView, QFileDialog, QFileSystemModel, QListWidgetItem, \
+    QErrorMessage
 import cv2
 import numpy as np
 from PIL import Image
@@ -120,7 +121,7 @@ class DetectionResultsModel(QAbstractListModel):
 class App(QApplication):
     def __init__(self):
         super().__init__([])
-        self.collection = TrainingCollection(".")
+        self.db = sqlite3.connect("visionUI.db")
         self.capture = Capture()
         Form, Window = uic.loadUiType("mainwindow.ui")
         self.window = Window()
@@ -144,25 +145,102 @@ class App(QApplication):
 
         self.model = None
         self.current_yolo_results = list()
+        self.capture_mode = "off"
 
         self.form.listROI.setModel(DetectionResultsModel(self))
 
         self.refresh_timer = QTimer(self)
-        # self.refresh_timer.start(16)
         self.refresh_timer.timeout.connect(self.refresh_video)
         self.form.yoloThresholdSlider.valueChanged.connect(self.change_yolo_threshold)
         self.form.buttonStartVideo.clicked.connect(self.start_video)
         self.form.enableYOLO.clicked.connect(self.enable_yolo)
         self.form.selectDirImageButton.clicked.connect(self.set_image_browser_directory)
-        # self.form.imageView.clicked.connect(self.imageView_onclick)
+        self.form.createNewDatasetButton.pressed.connect(self.create_new_dataset)
+        self.form.datasetNameList.activated.connect(self.select_dataset)
+        self.form.datasetNameEdit.editingFinished.connect(self.update_selected_dataset)
+        self.form.datasetType.activated.connect(self.update_selected_dataset)
+
+        self.refresh_datasets_namelist()
+        self.form.annotationsTab.setEnabled(False)
         self.window.show()
+
+    def update_selected_dataset(self):
+        desc = self.form.datasetNameList.currentText()
+        cursor = self.db.cursor()
+        cursor.execute("""UPDATE datasets 
+                           SET type=?, description=? 
+                           WHERE description=?""", (self.form.datasetType.currentIndex(),
+                                                    self.form.datasetNameEdit.text(),
+                                                    desc))
+        cursor.close()
+        self.db.commit()
+        self.refresh_datasets_namelist()
+
+    def select_dataset(self):
+        print("a")
+        desc = self.form.datasetNameList.currentText()
+        if desc == "":
+            return
+        cursor = self.db.cursor()
+        cursor.execute("SELECT * FROM datasets WHERE description=?", (desc,))
+        (did, dtype, _) = cursor.fetchall()[0]
+        self.form.datasetNameEdit.setText(desc)
+        self.form.datasetType.setCurrentIndex(dtype)
+        cursor.close()
+        print(self.form.annotationsTab.isEnabled())
+        print(self.form.groupBox_3.isEnabled())
+        self.form.annotationsTab.setEnabled(True)
+        print(self.form.annotationsTab.isEnabled())
+        print(self.form.groupBox_3.isEnabled())
+
+        print("b")
+
+    def create_new_dataset(self):
+        name = self.form.datasetNameEdit.text()
+        cursor = self.db.cursor()
+        cursor.execute("SELECT description FROM datasets WHERE description=?", (name,))
+        if len(list(cursor.fetchall()))>0:
+            QErrorMessage().showMessage(f"A dataset with name '{name}' already exists")
+            return
+        dataset_type = self.form.datasetType.currentIndex()
+        cursor.close()
+        cursor = self.db.cursor()
+        cursor.execute("INSERT INTO datasets (type, description) VALUES (?, ?)", (dataset_type, name))
+        cursor.close()
+        self.db.commit()
+        self.refresh_datasets_namelist()
+
+    def refresh_datasets_namelist(self):
+        cursor = self.db.cursor()
+        cursor.execute("SELECT description FROM datasets ORDER BY id;")
+        datasets=list(cursor.fetchall())
+        print(datasets)
+        index = self.form.datasetNameList.currentIndex()
+        self.form.datasetNameList.clear()
+        for ds in datasets:
+            self.form.datasetNameList.addItem(ds[0])
+        if self.form.datasetNameList.count() > index:
+            self.form.datasetNameList.setCurrentIndex(index)
+        cursor.close()
+
+
+    def set_video_mode(self, mode):
+        if self.capture_mode == "live video" and mode != "live video":
+            self.refresh_timer.stop()
+        if self.capture_mode != "live video" and mode == "live video":
+            self.refresh_timer.start(16)
+        self.capture_mode = mode
+        self.update_statusbar()
+
+    def update_statusbar(self):
+        self.window.statusBar().showMessage("Capture mode:"+str(self.capture_mode))
 
     def image_browser_select(self, index):
         self.current_image_browser_file=index.data()
+        self.set_video_mode("image file")
         self.update_image_view()
 
     def update_image_view(self):
-        print(dir)
         if self.current_image_browser_dir and self.current_image_browser_file:
             fullname = self.current_image_browser_dir + "/" + self.current_image_browser_file
             self.background_image_item.setPixmap(QPixmap(fullname))
@@ -182,16 +260,12 @@ class App(QApplication):
 
     def start_video(self):
         ind = self.form.videoIndex.text()
-        print(ind)
         try:
             ind = int(ind)
         except:
             ind = -1
-
-        print(ind)
         self.capture.open_camera(ind)
-        self.refresh_timer.start(16)
-        # self.form.imageView.refresh()
+        self.set_video_mode("live video")
 
     def refresh_video(self):
         self.refresh_timer.stop()
@@ -214,7 +288,7 @@ class App(QApplication):
                 self.poi_lines.append(self.scene.addLine(r[0], r[1]-10, r[0], r[1]+10,
                                                          QColor(255, 0, 0)))
             # self.form.listROI.setModel(QStringListModel(self.current_yolo_results))
-        if not self.form.pauseButton.isChecked():
+        if not self.form.pauseButton.isChecked() and self.capture_mode=="live video":
             self.refresh_timer.start(16)
 
     def change_yolo_threshold(self):
