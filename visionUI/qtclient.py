@@ -1,8 +1,9 @@
 import torch
 import PyQt5
 from PyQt5 import uic
-from PyQt5.QtCore import QTimer, QRect, QRectF, QStringListModel, QAbstractListModel, QDir, QItemSelectionModel
+from PyQt5.QtCore import QTimer, QRect, QRectF, QStringListModel, QAbstractListModel, QDir, QItemSelectionModel, Qt
 from PyQt5.QtGui import QImage, QPixmap, QColor
+from PyQt5.QtSql import QSqlQueryModel, QSqlTableModel, QSqlDatabase
 from PyQt5.QtWidgets import QApplication, QGraphicsScene, QGraphicsView, QFileDialog, QFileSystemModel, QListWidgetItem, \
     QErrorMessage
 import cv2
@@ -119,10 +120,21 @@ class DetectionResultsModel(QAbstractListModel):
 
 
 class App(QApplication):
+    DATASETS_DIRECTORY="vui_datasets"
+
     def __init__(self):
         super().__init__([])
         self.db = sqlite3.connect("visionUI.db")
+
+        self.qdb = QSqlDatabase()
+        self.qdb = QSqlDatabase.addDatabase("QSQLITE");
+        self.qdb.setDatabaseName("visionUI.db");
+
         self.capture = Capture()
+
+        if not os.path.exists(App.DATASETS_DIRECTORY):
+            os.mkdir(App.DATASETS_DIRECTORY)
+
         Form, Window = uic.loadUiType("mainwindow.ui")
         self.window = Window()
         self.form = Form()
@@ -131,6 +143,7 @@ class App(QApplication):
         self.form.splitter_video.setSizes([400, 200])
 
         self.form.imageView.mousePressEvent = self.imageView_onclick
+        self.form.zoomedView.mousePressEvent = self.zoomedView_onclick
 
         self.scene = QGraphicsScene()
         self.background_pixmap = QPixmap(QImage(b'\0\0\0\0', 1, 1, QImage.Format_ARGB32))
@@ -145,12 +158,21 @@ class App(QApplication):
 
         self.model = None
         self.current_yolo_results = list()
-        self.capture_mode = "off"
 
         self.form.listROI.setModel(DetectionResultsModel(self))
 
+        self.classes_model = QSqlTableModel()
+        self.classes_model.setTable("classes")
+        self.form.classesList.setModel(self.classes_model)
+        self.classes_model.select()
+
+        model = QSqlQueryModel()
+        model.setQuery("SELECT name FROM classes")
+        self.form.comboROIclass.setModel(model)
+
         self.refresh_timer = QTimer(self)
         self.refresh_timer.timeout.connect(self.refresh_video)
+
         self.form.yoloThresholdSlider.valueChanged.connect(self.change_yolo_threshold)
         self.form.buttonStartVideo.clicked.connect(self.start_video)
         self.form.enableYOLO.clicked.connect(self.enable_yolo)
@@ -159,10 +181,64 @@ class App(QApplication):
         self.form.datasetNameList.activated.connect(self.select_dataset)
         self.form.datasetNameEdit.editingFinished.connect(self.update_selected_dataset)
         self.form.datasetType.activated.connect(self.update_selected_dataset)
+        self.form.makeCandidateButton.pressed.connect(self.create_candidate)
+        self.form.candidatesList.currentItemChanged.connect(self.candidate_image_select)
+        self.form.newClassButton.clicked.connect(self.create_new_class)
+        self.form.deleteClassButton.clicked.connect(self.remove_class)
 
         self.refresh_datasets_namelist()
         self.form.annotationsTab.setEnabled(False)
         self.window.show()
+
+    def request(self, request, args):
+        cursor = self.db.cursor()
+        cursor.execute(request, args)
+        ret = list(cursor.fetchall())
+        cursor.close()
+        self.db.commit()
+        return ret
+
+    def remove_class(self):
+        # TODO: check if no annotation uses this class
+        ind = self.form.classesList.selectedIndexes()
+        if len(ind)==0:
+            return
+        ind = ind[0].row()
+        print(ind)
+        self.classes_model.deleteRowFromTable(ind)
+        self.classes_model.submitAll()
+        self.classes_model.select()
+
+    def create_new_class(self):
+        cm = self.classes_model
+        row = self.classes_model.rowCount()
+        cm.insertRows(row, 1)
+        cm.submitAll()
+        self.form.classesList.reset()
+
+
+    def create_candidate(self):
+        fulldir = App.DATASETS_DIRECTORY + "/" + self.form.datasetNameList.currentText()
+        if not os.path.exists(fulldir):
+            os.mkdir(fulldir)
+        filelist = os.listdir(fulldir)
+        frame_num = 0
+
+        if self.capture.source_type == Capture.SOURCE_TYPE_CAMERA:
+            filename = f"frame_{frame_num:08}.jpg"
+            while filename in filelist:
+                frame_num += 1
+                filename = f"frame_{frame_num:08}.jpg"
+        if self.capture.source_type == Capture.SOURCE_TYPE_FILE:
+            namepart = ".".join(self.current_image_browser_file.split(".")[:-1])
+            filename = f"{namepart}.jpg"
+            while filename in filelist:
+                filename = f"{namepart}_{frame_num:04}.jpg"
+                frame_num += 1
+
+        fullpath = fulldir+"/"+filename
+        Image.fromarray(self.capture.current_np).save(fullpath)
+        self.form.candidatesList.addItem(filename)
 
     def update_selected_dataset(self):
         desc = self.form.datasetNameList.currentText()
@@ -177,7 +253,6 @@ class App(QApplication):
         self.refresh_datasets_namelist()
 
     def select_dataset(self):
-        print("a")
         desc = self.form.datasetNameList.currentText()
         if desc == "":
             return
@@ -187,13 +262,7 @@ class App(QApplication):
         self.form.datasetNameEdit.setText(desc)
         self.form.datasetType.setCurrentIndex(dtype)
         cursor.close()
-        print(self.form.annotationsTab.isEnabled())
-        print(self.form.groupBox_3.isEnabled())
         self.form.annotationsTab.setEnabled(True)
-        print(self.form.annotationsTab.isEnabled())
-        print(self.form.groupBox_3.isEnabled())
-
-        print("b")
 
     def create_new_dataset(self):
         name = self.form.datasetNameEdit.text()
@@ -210,6 +279,19 @@ class App(QApplication):
         self.db.commit()
         self.refresh_datasets_namelist()
 
+    def refresh_class_list(self):
+        cursor = self.db.cursor()
+        cursor.execute("SELECT name, description, encoding FROM classes ORDER BY id;")
+        classes = list(cursor.fetchall())
+        print(classes)
+        index = self.form.classesList.currentIndex()
+        # self.form.classesList.clear()
+        for cl in classes:
+            self.form.classesList.addItem(cl[0])
+        if self.form.classesList.count() > index:
+            self.form.classesList.setCurrentIndex(index)
+        cursor.close()
+
     def refresh_datasets_namelist(self):
         cursor = self.db.cursor()
         cursor.execute("SELECT description FROM datasets ORDER BY id;")
@@ -223,36 +305,25 @@ class App(QApplication):
             self.form.datasetNameList.setCurrentIndex(index)
         cursor.close()
 
-
-    def set_video_mode(self, mode):
-        if self.capture_mode == "live video" and mode != "live video":
-            self.refresh_timer.stop()
-        if self.capture_mode != "live video" and mode == "live video":
-            self.refresh_timer.start(16)
-        self.capture_mode = mode
-        self.update_statusbar()
-
     def update_statusbar(self):
         self.window.statusBar().showMessage("Capture mode:"+str(self.capture_mode))
 
     def image_browser_select(self, index):
         self.current_image_browser_file=index.data()
-        self.set_video_mode("image file")
-        self.update_image_view()
+        fullname = self.current_image_browser_dir + "/" + self.current_image_browser_file
+        self.capture.open_file(fullname)
 
-    def update_image_view(self):
-        if self.current_image_browser_dir and self.current_image_browser_file:
-            fullname = self.current_image_browser_dir + "/" + self.current_image_browser_file
-            self.background_image_item.setPixmap(QPixmap(fullname))
+    def candidate_image_select(self):
+        filename = self.form.candidatesList.currentItem().data(Qt.DisplayRole)
+        fullname = App.DATASETS_DIRECTORY + "/" + self.form.datasetNameList.currentText() + "/" + filename
+        self.capture.open_file(fullname)
 
     def set_image_browser_directory(self):
         dir = QFileDialog.getExistingDirectory(caption="Images directory", directory=".")
-        print(dir)
         self.current_image_browser_dir=dir
         self.form.labelImageDirectory.setText(dir)
         self.form.labelImageDirectory.setToolTip(dir)
         browse_image_model = QFileSystemModel()
-        # browse_image_model.setFilter(QDir.Filters("*"))
         browse_image_model.setRootPath(dir)
         self.form.BrowseImageList.setModel(browse_image_model)
         self.form.BrowseImageList.setRootIndex(browse_image_model.index(dir))
@@ -265,7 +336,7 @@ class App(QApplication):
         except:
             ind = -1
         self.capture.open_camera(ind)
-        self.set_video_mode("live video")
+        self.refresh_timer.start(16)
 
     def refresh_video(self):
         self.refresh_timer.stop()
@@ -288,7 +359,7 @@ class App(QApplication):
                 self.poi_lines.append(self.scene.addLine(r[0], r[1]-10, r[0], r[1]+10,
                                                          QColor(255, 0, 0)))
             # self.form.listROI.setModel(QStringListModel(self.current_yolo_results))
-        if not self.form.pauseButton.isChecked() and self.capture_mode=="live video":
+        if not self.form.pauseButton.isChecked():
             self.refresh_timer.start(16)
 
     def change_yolo_threshold(self):
@@ -311,15 +382,36 @@ class App(QApplication):
         print(x,y)
         print(p)
         self.form.zoomedView.setSceneRect(x - 10, y-10, 20,20)
-        objs = self.form.imageView.items(x-5, y-5, x+5, y+5)
-        if len(objs) < 2:
-            return
-        o = objs[0]
-        ind = self.poi_lines.index(o)
-        ind = int(ind/2)
-        qind = self.form.listROI.model().index(ind,0)
-        self.form.listROI.setCurrentIndex(qind)
 
+    def zoomedView_onclick(self, event):
+        p = self.form.zoomedView.mapToScene(event.pos())
+        x = int(p.x())
+        y = int(p.y())
+        print(x,y)
+        print(p)
+
+        if self.form.selectPointButton.isChecked():
+            objs = self.form.imageView.items(x-5, y-5, x+5, y+5)
+            if len(objs) < 2:
+                return
+            o = objs[0]
+            print(objs)
+            ind = self.poi_lines.index(o)
+            ind = int(ind/2)
+            print(ind)
+            qind = self.form.listROI.model().index(ind,0)
+            self.form.listROI.setCurrentIndex(qind)
+        if self.form.pointCreateButton.isChecked():
+            self.create_point(x,y)
+
+    def create_point(self, x, y):
+        obj_class = self.form.comboROIclass.currentText()
+        self.request("SELECT * FROM classes WHERE name=?", (obj_class))
+        self.scene.addLine(x - 10, y, x + 10, y, QColor(0, 0, 255))
+        self.scene.addLine(x, y - 10, x, y + 10, QColor(0, 0, 255))
+
+    def refresh_roi_scene(self):
+        self.request("SELECT * FROM annotated_file,  WHERE name=?", (obj_class))
 
 
 
