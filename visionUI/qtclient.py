@@ -1,7 +1,8 @@
 import torch
 import PyQt5
 from PyQt5 import uic
-from PyQt5.QtCore import QTimer, QRect, QRectF, QStringListModel, QAbstractListModel, QDir, QItemSelectionModel, Qt
+from PyQt5.QtCore import QTimer, QRect, QRectF, QStringListModel, QAbstractListModel, QDir, QItemSelectionModel, Qt, \
+    QModelIndex
 from PyQt5.QtGui import QImage, QPixmap, QColor
 from PyQt5.QtSql import QSqlQueryModel, QSqlTableModel, QSqlDatabase
 from PyQt5.QtWidgets import QApplication, QGraphicsScene, QGraphicsView, QFileDialog, QFileSystemModel, QListWidgetItem, \
@@ -63,62 +64,6 @@ class Capture:
             self.needs_refresh = False
 
 
-class TrainingCollection:
-    def __init__(self, collection_path):
-        self.path = collection_path
-        self.connection = sqlite3.connect(self.path+"/collection.db")
-        cursor = self.connection.cursor()
-        cursor.execute("SELECT name FROM sqlite_master WHERE type='table';")
-        tables = [x[0] for x in cursor.fetchall()]
-        cursor.close()
-        if "models" not in tables:
-                cursor = self.connection.cursor()
-                cursor.execute("""CREATE TABLE models 
-                                (id integer primary key,
-                                rel_path text, abs_path text, name text,
-                                creation_date timestamp, last_training timestamp,
-                                score real, epochs integer, samples integer)""")
-                cursor.close()
-
-        if "classes" not in tables:
-            cursor = self.connection.cursor()
-            cursor.execute("""CREATE TABLE classes
-                                (id INTEGER PRIMARY KEY,
-                                name TEXT, class_id INTEGER, model_id INTEGER 
-                                rel_path text, abs_path text,
-                                creation_date timestamp, last_training timestamp,
-                                score real, epochs integer, samples integer,
-                                FOREIGN KEY(model_id) REFERENCES model(id))""")
-            cursor.close()
-
-        if "training_samples" not in tables:
-            cursor = self.connection.cursor()
-            cursor.execute("""CREATE TABLE training_samples
-                                (id INTEGER PRIMARY KEY,
-                                image_rel_path TEXT, image_abs_path TEXT,
-                                labels_rel_path TEXT, labels_abs_path)""")
-            cursor.close()
-
-        if "candidate_samples" not in tables:
-            cursor = self.connection.cursor()
-            cursor.execute("""CREATE TABLE candidate_samples
-                                (id INTEGER PRIMARY KEY,
-                                rel_path TEXT, abs_path TEXT)""")
-            cursor.close()
-
-
-class DetectionResultsModel(QAbstractListModel):
-    def __init__(self, parent):
-        super().__init__()
-        self.parent = parent
-
-    def rowCount(self, parent):
-        return len(self.parent.current_yolo_results)
-
-    def data(self, index, role):
-        return self.parent.current_yolo_results[index.row()]
-
-
 class App(QApplication):
     DATASETS_DIRECTORY="vui_datasets"
 
@@ -156,10 +101,8 @@ class App(QApplication):
         self.current_image_browser_dir = None
         self.current_image_browser_file = None
 
-        self.model = None
+        self.ml_model = None
         self.current_yolo_results = list()
-
-        self.form.listROI.setModel(DetectionResultsModel(self))
 
         self.classes_model = QSqlTableModel()
         self.classes_model.setTable("classes")
@@ -204,7 +147,6 @@ class App(QApplication):
         if len(ind)==0:
             return
         ind = ind[0].row()
-        print(ind)
         self.classes_model.deleteRowFromTable(ind)
         self.classes_model.submitAll()
         self.classes_model.select()
@@ -215,7 +157,6 @@ class App(QApplication):
         cm.insertRows(row, 1)
         cm.submitAll()
         self.form.classesList.reset()
-
 
     def create_candidate(self):
         fulldir = App.DATASETS_DIRECTORY + "/" + self.form.datasetNameList.currentText()
@@ -279,19 +220,6 @@ class App(QApplication):
         self.db.commit()
         self.refresh_datasets_namelist()
 
-    def refresh_class_list(self):
-        cursor = self.db.cursor()
-        cursor.execute("SELECT name, description, encoding FROM classes ORDER BY id;")
-        classes = list(cursor.fetchall())
-        print(classes)
-        index = self.form.classesList.currentIndex()
-        # self.form.classesList.clear()
-        for cl in classes:
-            self.form.classesList.addItem(cl[0])
-        if self.form.classesList.count() > index:
-            self.form.classesList.setCurrentIndex(index)
-        cursor.close()
-
     def refresh_datasets_namelist(self):
         cursor = self.db.cursor()
         cursor.execute("SELECT description FROM datasets ORDER BY id;")
@@ -346,7 +274,7 @@ class App(QApplication):
             qimg = QImage(img.data, img.shape[1], img.shape[0], img.shape[1]*3, QImage.Format_RGB888)
             self.background_image_item.setPixmap(QPixmap(qimg))
         if self.form.enableYOLO.isChecked():
-            results = self.model(self.capture.current_np)
+            results = self.ml_model(self.capture.current_np)
             self.current_yolo_results.clear()
             for r in self.poi_lines:
                 self.scene.removeItem(r)
@@ -358,22 +286,23 @@ class App(QApplication):
                                                          QColor(255,0,0)))
                 self.poi_lines.append(self.scene.addLine(r[0], r[1]-10, r[0], r[1]+10,
                                                          QColor(255, 0, 0)))
-            # self.form.listROI.setModel(QStringListModel(self.current_yolo_results))
+            self.form.listROI.setModel(QStringListModel(self.current_yolo_results))
+            # self.form.listROI.model().dataChanged.emit(QModelIndex(), QModelIndex())
         if not self.form.pauseButton.isChecked():
             self.refresh_timer.start(16)
 
     def change_yolo_threshold(self):
         value = self.form.yoloThresholdSlider.value() / 1000.0
         self.form.yoloThresholdLabel.setText(f"{value:.3f}")
-        if self.model is not None:
-            self.model.conf = value
+        if self.ml_model is not None:
+            self.ml_model.conf = value
         self.refresh_video()
 
     def enable_yolo(self):
-        if self.form.enableYOLO.isChecked() and self.model is None:
-            self.model = torch.hub.load('../yolov5/', 'custom',
-                                        path='../runs/train/exp11/weights/best.pt',
-                                        source='local')
+        if self.form.enableYOLO.isChecked() and self.ml_model is None:
+            self.ml_model = torch.hub.load('../yolov5/', 'custom',
+                                           path='../runs/train/exp11/weights/best.pt',
+                                           source='local')
 
     def imageView_onclick(self, event):
         p = self.form.imageView.mapToScene(event.pos())
@@ -399,7 +328,7 @@ class App(QApplication):
             ind = self.poi_lines.index(o)
             ind = int(ind/2)
             print(ind)
-            qind = self.form.listROI.model().index(ind,0)
+            qind = self.form.listROI.ml_model().index(ind, 0)
             self.form.listROI.setCurrentIndex(qind)
         if self.form.pointCreateButton.isChecked():
             self.create_point(x,y)
