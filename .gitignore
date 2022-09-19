@@ -130,3 +130,8 @@ dmypy.json
 /datasets/
 /runs/
 visionUI/candidates
+
+yolov5/
+vui_datasets/
+.idea/
+*.db
