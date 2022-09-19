@@ -4,7 +4,7 @@ from PyQt5 import uic
 from PyQt5.QtCore import QTimer, QRect, QRectF, QStringListModel, QAbstractListModel, QDir, QItemSelectionModel, Qt, \
     QModelIndex
 from PyQt5.QtGui import QImage, QPixmap, QColor
-from PyQt5.QtSql import QSqlQueryModel, QSqlTableModel, QSqlDatabase
+from PyQt5.QtSql import QSqlQueryModel, QSqlTableModel, QSqlDatabase, QSqlDriver
 from PyQt5.QtWidgets import QApplication, QGraphicsScene, QGraphicsView, QFileDialog, QFileSystemModel, QListWidgetItem, \
     QErrorMessage
 import cv2
@@ -64,6 +64,9 @@ class Capture:
             self.needs_refresh = False
 
 
+def debug():
+    print("plop")
+
 class App(QApplication):
     DATASETS_DIRECTORY="vui_datasets"
 
@@ -73,7 +76,15 @@ class App(QApplication):
 
         self.qdb = QSqlDatabase()
         self.qdb = QSqlDatabase.addDatabase("QSQLITE");
-        self.qdb.setDatabaseName("visionUI.db");
+        self.qdb.setDatabaseName("visionUI.db")
+
+        if self.qdb.driver().hasFeature(QSqlDriver.EventNotifications):
+            self.qdb.driver().subscribeToNotification("classes")
+            self.qdb.driver().notification.connect(debug)
+        else:
+            print("Driver does NOT support database event notifications");
+            return
+
 
         self.capture = Capture()
 
