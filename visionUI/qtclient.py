@@ -1,3 +1,5 @@
+from datetime import datetime
+
 import torch
 import PyQt5
 from PyQt5 import uic
@@ -64,32 +66,19 @@ class Capture:
             self.needs_refresh = False
 
 
-def debug():
-    print("plop")
-
 class App(QApplication):
-    DATASETS_DIRECTORY="vui_datasets"
+    DATASET_DIRECTORY="vui_datasets"
+    CANDIDATES_DIR = f"{DATASET_DIRECTORY}/candidates/"
+    KEYFRAMES_DIR = f"{DATASET_DIRECTORY}/keyframes/"
 
     def __init__(self):
         super().__init__([])
-        self.db = sqlite3.connect("visionUI.db")
-
-        self.qdb = QSqlDatabase()
-        self.qdb = QSqlDatabase.addDatabase("QSQLITE");
-        self.qdb.setDatabaseName("visionUI.db")
-
-        if self.qdb.driver().hasFeature(QSqlDriver.EventNotifications):
-            self.qdb.driver().subscribeToNotification("classes")
-            self.qdb.driver().notification.connect(debug)
-        else:
-            print("Driver does NOT support database event notifications");
-            return
-
+        self.db = sqlite3.connect(f"{App.DATASET_DIRECTORY}/visionUI.db")
 
         self.capture = Capture()
 
-        if not os.path.exists(App.DATASETS_DIRECTORY):
-            os.mkdir(App.DATASETS_DIRECTORY)
+        if not os.path.exists(App.DATASET_DIRECTORY):
+            os.mkdir(App.DATASET_DIRECTORY)
 
         Form, Window = uic.loadUiType("mainwindow.ui")
         self.window = Window()
@@ -100,6 +89,7 @@ class App(QApplication):
 
         self.form.imageView.mousePressEvent = self.imageView_onclick
         self.form.zoomedView.mousePressEvent = self.zoomedView_onclick
+        self.scene_selection = None
 
         self.scene = QGraphicsScene()
         self.background_pixmap = QPixmap(QImage(b'\0\0\0\0', 1, 1, QImage.Format_ARGB32))
@@ -115,14 +105,15 @@ class App(QApplication):
         self.ml_model = None
         self.current_yolo_results = list()
 
-        self.classes_model = QSqlTableModel()
-        self.classes_model.setTable("classes")
-        self.form.classesList.setModel(self.classes_model)
-        self.classes_model.select()
+        for cl in self.request("SELECT * FROM classes;"):
+            self.form.classesList.addItem(f"{cl[3]}\t{cl[1]}:  {cl[2]}")
+            self.form.comboROIclass.addItem(f"{cl[3]}:{cl[1]}")
 
-        model = QSqlQueryModel()
-        model.setQuery("SELECT name FROM classes")
-        self.form.comboROIclass.setModel(model)
+        model = QFileSystemModel(self)
+        self.form.candidatesList.setModel(model)
+        self.form.candidatesList.setRootIndex(model.setRootPath(App.CANDIDATES_DIR))
+
+        self.form.listROI.setModel(QStringListModel())
 
         self.refresh_timer = QTimer(self)
         self.refresh_timer.timeout.connect(self.refresh_video)
@@ -131,20 +122,19 @@ class App(QApplication):
         self.form.buttonStartVideo.clicked.connect(self.start_video)
         self.form.enableYOLO.clicked.connect(self.enable_yolo)
         self.form.selectDirImageButton.clicked.connect(self.set_image_browser_directory)
-        self.form.createNewDatasetButton.pressed.connect(self.create_new_dataset)
-        self.form.datasetNameList.activated.connect(self.select_dataset)
-        self.form.datasetNameEdit.editingFinished.connect(self.update_selected_dataset)
-        self.form.datasetType.activated.connect(self.update_selected_dataset)
+        # self.form.createNewDatasetButton.pressed.connect(self.create_new_dataset)
+        # self.form.datasetNameList.activated.connect(self.select_dataset)
+        # self.form.datasetNameEdit.editingFinished.connect(self.update_selected_dataset)
+        # self.form.datasetType.activated.connect(self.update_selected_dataset)
         self.form.makeCandidateButton.pressed.connect(self.create_candidate)
-        self.form.candidatesList.currentItemChanged.connect(self.candidate_image_select)
+        self.form.candidatesList.selectionModel().selectionChanged.connect(self.candidate_image_select)
         self.form.newClassButton.clicked.connect(self.create_new_class)
         self.form.deleteClassButton.clicked.connect(self.remove_class)
 
-        self.refresh_datasets_namelist()
-        self.form.annotationsTab.setEnabled(False)
+        # self.form.annotationsTab.setEnabled(False)
         self.window.show()
 
-    def request(self, request, args):
+    def request(self, request, args=[]):
         cursor = self.db.cursor()
         cursor.execute(request, args)
         ret = list(cursor.fetchall())
@@ -169,80 +159,40 @@ class App(QApplication):
         cm.submitAll()
         self.form.classesList.reset()
 
+    @staticmethod
+    def make_uid():
+        return datetime.now().strftime("%Y-%m-%d_%H-%M-%S.%f")
+
     def create_candidate(self):
-        fulldir = App.DATASETS_DIRECTORY + "/" + self.form.datasetNameList.currentText()
+        fulldir = f"{App.DATASET_DIRECTORY}/candidates/"
         if not os.path.exists(fulldir):
             os.mkdir(fulldir)
-        filelist = os.listdir(fulldir)
-        frame_num = 0
+        uid = self.make_uid()
 
         if self.capture.source_type == Capture.SOURCE_TYPE_CAMERA:
-            filename = f"frame_{frame_num:08}.jpg"
-            while filename in filelist:
-                frame_num += 1
-                filename = f"frame_{frame_num:08}.jpg"
+            filename = f"{uid}.jpg"
         if self.capture.source_type == Capture.SOURCE_TYPE_FILE:
             namepart = ".".join(self.current_image_browser_file.split(".")[:-1])
-            filename = f"{namepart}.jpg"
-            while filename in filelist:
-                filename = f"{namepart}_{frame_num:04}.jpg"
-                frame_num += 1
+            filename = f"{uid}_was_{namepart}.jpg"
 
         fullpath = fulldir+"/"+filename
+        print(fullpath)
         Image.fromarray(self.capture.current_np).save(fullpath)
-        self.form.candidatesList.addItem(filename)
 
-    def update_selected_dataset(self):
-        desc = self.form.datasetNameList.currentText()
-        cursor = self.db.cursor()
-        cursor.execute("""UPDATE datasets 
-                           SET type=?, description=? 
-                           WHERE description=?""", (self.form.datasetType.currentIndex(),
-                                                    self.form.datasetNameEdit.text(),
-                                                    desc))
-        cursor.close()
-        self.db.commit()
-        self.refresh_datasets_namelist()
-
-    def select_dataset(self):
-        desc = self.form.datasetNameList.currentText()
-        if desc == "":
-            return
-        cursor = self.db.cursor()
-        cursor.execute("SELECT * FROM datasets WHERE description=?", (desc,))
-        (did, dtype, _) = cursor.fetchall()[0]
-        self.form.datasetNameEdit.setText(desc)
-        self.form.datasetType.setCurrentIndex(dtype)
-        cursor.close()
-        self.form.annotationsTab.setEnabled(True)
-
-    def create_new_dataset(self):
-        name = self.form.datasetNameEdit.text()
-        cursor = self.db.cursor()
-        cursor.execute("SELECT description FROM datasets WHERE description=?", (name,))
-        if len(list(cursor.fetchall()))>0:
-            QErrorMessage().showMessage(f"A dataset with name '{name}' already exists")
-            return
-        dataset_type = self.form.datasetType.currentIndex()
-        cursor.close()
-        cursor = self.db.cursor()
-        cursor.execute("INSERT INTO datasets (type, description) VALUES (?, ?)", (dataset_type, name))
-        cursor.close()
-        self.db.commit()
-        self.refresh_datasets_namelist()
-
-    def refresh_datasets_namelist(self):
-        cursor = self.db.cursor()
-        cursor.execute("SELECT description FROM datasets ORDER BY id;")
-        datasets=list(cursor.fetchall())
-        print(datasets)
-        index = self.form.datasetNameList.currentIndex()
-        self.form.datasetNameList.clear()
-        for ds in datasets:
-            self.form.datasetNameList.addItem(ds[0])
-        if self.form.datasetNameList.count() > index:
-            self.form.datasetNameList.setCurrentIndex(index)
-        cursor.close()
+    # def create_new_dataset(self):
+    #     name = self.form.datasetNameEdit.text()
+    #     cursor = self.db.cursor()
+    #     cursor.execute("SELECT description FROM datasets WHERE description=?", (name,))
+    #     if len(list(cursor.fetchall()))>0:
+    #         QErrorMessage().showMessage(f"A dataset with name '{name}' already exists")
+    #         return
+    #     dataset_type = self.form.datasetType.currentIndex()
+    #     cursor.close()
+    #     cursor = self.db.cursor()
+    #     cursor.execute("INSERT INTO datasets (type, description) VALUES (?, ?)", (dataset_type, name))
+    #     cursor.close()
+    #     self.db.commit()
+    #     self.refresh_datasets_namelist()
 
     def update_statusbar(self):
         self.window.statusBar().showMessage("Capture mode:"+str(self.capture_mode))
@@ -253,9 +203,10 @@ class App(QApplication):
         self.capture.open_file(fullname)
 
     def candidate_image_select(self):
-        filename = self.form.candidatesList.currentItem().data(Qt.DisplayRole)
-        fullname = App.DATASETS_DIRECTORY + "/" + self.form.datasetNameList.currentText() + "/" + filename
+        filename_index = self.form.candidatesList.currentIndex()
+        fullname = self.form.candidatesList.model().filePath(filename_index)
         self.capture.open_file(fullname)
+        self.refresh_video()
 
     def set_image_browser_directory(self):
         dir = QFileDialog.getExistingDirectory(caption="Images directory", directory=".")
@@ -327,28 +278,52 @@ class App(QApplication):
         p = self.form.zoomedView.mapToScene(event.pos())
         x = int(p.x())
         y = int(p.y())
-        print(x,y)
-        print(p)
 
         if self.form.selectPointButton.isChecked():
             objs = self.form.imageView.items(x-5, y-5, x+5, y+5)
             if len(objs) < 2:
                 return
             o = objs[0]
-            print(objs)
             ind = self.poi_lines.index(o)
             ind = int(ind/2)
-            print(ind)
-            qind = self.form.listROI.ml_model().index(ind, 0)
+            if self.scene_selection:
+                old_ind = self.poi_lines.index(self.scene_selection)//2
+                self.poi_lines[old_ind * 2].setPen(QColor(0, 0, 255))
+                self.poi_lines[old_ind * 2+1].setPen(QColor(0, 0, 255))
+            self.poi_lines[ind * 2].setPen(QColor(255, 0, 0))
+            self.poi_lines[ind * 2+1].setPen(QColor(255, 0, 0))
+            self.scene_selection = o
+            qind = self.form.listROI.model().index(ind, 0)
             self.form.listROI.setCurrentIndex(qind)
+
         if self.form.pointCreateButton.isChecked():
-            self.create_point(x,y)
+            self.create_point(x, y)
+
+        if self.form.movePointButton.isChecked():
+            if self.scene_selection:
+                ind = self.poi_lines.index(self.scene_selection)//2
+                obj = self.poi_lines[ind * 2]
+                obj.setLine(x - 10, y, x + 10, y)
+                obj = self.poi_lines[ind * 2+1]
+                obj.setLine(x, y - 10, x, y + 10)
+                s = self.form.listROI.model().stringList()[ind]
+                print(s)
+                print(s.rstrip().split(" ")[-1])
+                m=self.form.listROI.model()
+                m.setData(m.index(ind,0), f"{x} {y} {1} {1} {1.0} {s.rstrip().split(' ')[-1]}")
 
     def create_point(self, x, y):
-        obj_class = self.form.comboROIclass.currentText()
-        self.request("SELECT * FROM classes WHERE name=?", (obj_class))
-        self.scene.addLine(x - 10, y, x + 10, y, QColor(0, 0, 255))
-        self.scene.addLine(x, y - 10, x, y + 10, QColor(0, 0, 255))
+        obj_class = self.form.comboROIclass.currentText().split(":")[0]
+        print("class:", obj_class)
+        self.request("SELECT * FROM classes WHERE encoding=?", [obj_class])
+        self.poi_lines.append(
+            self.scene.addLine(x - 10, y, x + 10, y, QColor(0, 0, 255)))
+        self.poi_lines.append(
+            self.scene.addLine(x, y - 10, x, y + 10, QColor(0, 0, 255)))
+        m = self.form.listROI.model()
+        if m.insertRow(m.rowCount()):
+            ind = m.index(m.rowCount() - 1, 0)
+            m.setData(ind, f"{x} {y} {1} {1} {1.0} {obj_class}")
 
     def refresh_roi_scene(self):
         self.request("SELECT * FROM annotated_file,  WHERE name=?", (obj_class))
