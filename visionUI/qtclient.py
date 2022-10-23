@@ -121,7 +121,7 @@ class App(QApplication):
         self.form.keyframesList.setModel(model)
         self.form.keyframesList.setRootIndex(model.setRootPath(App.KEYFRAMES_DIR))
 
-        self.form.listROI.setModel(QStringListModel())
+        self.form.listROI.clicked.connect(self.select_annotation_from_list)
 
         self.refresh_timer = QTimer(self)
         self.refresh_timer.timeout.connect(self.refresh_video)
@@ -259,7 +259,6 @@ class App(QApplication):
         self.capture.open_file(fullname)
         self.refresh_video()
         self.selected_file_id = self.get_uid_from_filename(filename)
-        self.form.labelKFID.setText(self.selected_file_id)
         self.refresh_annotations_list()
 
     def candidate_image_select(self):
@@ -269,7 +268,6 @@ class App(QApplication):
         self.capture.open_file(fullname)
         self.refresh_video()
         self.selected_file_id = self.get_uid_from_filename(filename)
-        self.form.labelKFID.setText(self.selected_file_id)
         self.refresh_annotations_list()
 
     def set_image_browser_directory(self):
@@ -312,7 +310,8 @@ class App(QApplication):
                                                          QColor(255,0,0)))
                 self.poi_lines.append(self.scene.addLine(r[0], r[1]-10, r[0], r[1]+10,
                                                          QColor(255, 0, 0)))
-            self.form.listROI.setModel(QStringListModel(self.current_yolo_results))
+            self.form.listROI.clear()
+            self.form.listROI.addItems(self.current_yolo_results)
             # self.form.listROI.model().dataChanged.emit(QModelIndex(), QModelIndex())
         if not self.form.pauseButton.isChecked():
             self.refresh_timer.start(16)
@@ -337,19 +336,18 @@ class App(QApplication):
         self.form.zoomedView.setSceneRect(x - 10, y-10, 20,20)
 
     def refresh_annotations_list(self):
-        annotations = self.request("SELECT id, type, x,y, class_id FROM annotations WHERE file_id=?", [self.selected_file_id])
-
+        annotations = self.request("SELECT id, type, x,y, class_id FROM annotations WHERE file_id=? ORDER BY id", [self.selected_file_id])
         for r in self.poi_lines:
             self.scene.removeItem(r)
         self.poi_lines.clear()
-        w = 1#self.background_image_item.boundingRect().width()
-        h = 1#self.background_image_item.boundingRect().height()
+        w = self.background_image_item.boundingRect().width()
+        h = self.background_image_item.boundingRect().height()
         i = 0
         selected_index = -1
         str_list = list()
         for aid, ty, x, y, cid in annotations:
-            x = x*w
-            y = y*h
+            x = round(x*w)
+            y = round(y*h)
             if ty == 1:
                 anot_type = "POINT"
             else:
@@ -366,9 +364,10 @@ class App(QApplication):
                 self.scene.addLine(x, y - 10, x, y + 10, color))
             i += 1
 
-        m = QStringListModel(str_list)
-        self.form.listROI.setModel(m)
-        self.form.listROI.setCurrentIndex(m.index(selected_index,0))
+        self.form.listROI.clear()
+        self.form.listROI.addItems(str_list)
+        self.form.listROI.setCurrentRow(selected_index)
+
 
     def zoomedView_onclick(self, event):
         p = self.form.zoomedView.mapToScene(event.pos())
@@ -423,7 +422,7 @@ train: keyframes/ # train images relative to path
 val: keyframes/ # validation images relative to path
 test: 
 
-nc {len(classes)}
+nc: {len(classes)}
 names: {str(list(classes.values()))}
 """
         yamlfile = open(filename, "w")
@@ -441,6 +440,14 @@ names: {str(list(classes.values()))}
                 label_file.write(f"{list(classes.keys()).index(cid)} {x} {y} 0.03 0.03\n")
             fn.split()
         return
+
+    def select_annotation_from_list(self):
+        annotations = self.request("SELECT id FROM annotations WHERE file_id=? ORDER BY id",
+                                   [self.selected_file_id])
+        previous = self.scene_selection
+        self.scene_selection = annotations[self.form.listROI.currentRow()][0]
+        if previous != self.scene_selection:
+            self.refresh_annotations_list()
 
 app = App()
 app.exec_()
