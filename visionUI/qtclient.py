@@ -78,7 +78,7 @@ class App(QApplication):
         if len(sys.argv)>1:
             App.DATASET_DIRECTORY = sys.argv[1]
         App.CANDIDATES_DIR = f"{App.DATASET_DIRECTORY}/candidates/"
-        App.KEYFRAMES_DIR = f"{App.DATASET_DIRECTORY}/keyframes/"
+        App.KEYFRAMES_DIR = f"{App.DATASET_DIRECTORY}/images/"
         if not os.path.exists(App.DATASET_DIRECTORY):
             os.mkdir(App.DATASET_DIRECTORY)
         if not os.path.exists(App.CANDIDATES_DIR):
@@ -126,6 +126,7 @@ class App(QApplication):
         self.refresh_timer = QTimer(self)
         self.refresh_timer.timeout.connect(self.refresh_video)
 
+        self.form.changeClassButton.clicked.connect(self.change_selection_class)
         self.form.yoloThresholdSlider.valueChanged.connect(self.change_yolo_threshold)
         self.form.buttonStartVideo.clicked.connect(self.start_video)
         self.form.enableYOLO.clicked.connect(self.enable_yolo)
@@ -325,8 +326,10 @@ class App(QApplication):
 
     def enable_yolo(self):
         if self.form.enableYOLO.isChecked() and self.ml_model is None:
+            # print(os.get_cwd)
+            # print(os.listdir(""))
             self.ml_model = torch.hub.load('../yolov5/', 'custom',
-                                           path='../runs/train/exp11/weights/best.pt',
+                                           path='../yolov5/runs/train/exp13/weights/best.pt',
                                            source='local')
 
     def imageView_onclick(self, event):
@@ -418,8 +421,8 @@ class App(QApplication):
         classes = {e:c for c,e in results}
         s = ""
         s += f"""path: {p.resolve()} # dataset root dir
-train: keyframes/ # train images relative to path
-val: keyframes/ # validation images relative to path
+train: images/ # train images relative to path
+val: images/ # validation images relative to path
 test: 
 
 nc: {len(classes)}
@@ -433,7 +436,7 @@ names: {str(list(classes.values()))}
         # Write labels txt files
         if not os.path.exists(p/"labels"):
             os.mkdir(p/"labels")
-        for fn in os.listdir(p / "keyframes"):
+        for fn in os.listdir(App.KEYFRAMES_DIR):
             label_file = open((p/"labels"/fn).with_suffix(".txt"), "w")
             annotations = self.request("SELECT x,y,class_id FROM annotations WHERE file_id=?", [str(Path(fn).with_suffix(""))])
             for x, y, cid in annotations:
@@ -448,6 +451,11 @@ names: {str(list(classes.values()))}
         self.scene_selection = annotations[self.form.listROI.currentRow()][0]
         if previous != self.scene_selection:
             self.refresh_annotations_list()
+
+    def change_selection_class(self):
+        cenc = self.form.comboROIclass.currentText().split(":")[0]
+        self.request("UPDATE annotations SET class_id=? WHERE id=?", [cenc,self.scene_selection])
+        self.refresh_annotations_list()
 
 app = App()
 app.exec_()
