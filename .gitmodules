@@ -1,0 +1,3 @@
+[submodule "ivlib"]
+	path = ivlib
+	url = git@github.com:yquemener/ivlib.git

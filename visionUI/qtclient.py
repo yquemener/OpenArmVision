@@ -8,8 +8,9 @@ from PyQt5.QtCore import QTimer, QRect, QRectF, QStringListModel, QAbstractListM
 from PyQt5.QtGui import QImage, QPixmap, QColor
 from PyQt5.QtSql import QSqlQueryModel, QSqlTableModel, QSqlDatabase, QSqlDriver
 from PyQt5.QtWidgets import QApplication, QGraphicsScene, QGraphicsView, QFileDialog, QFileSystemModel, QListWidgetItem, \
-    QErrorMessage
+    QErrorMessage, QMessageBox
 import cv2
+import sys
 import numpy as np
 from PIL import Image
 import time
@@ -68,17 +69,22 @@ class Capture:
 
 class App(QApplication):
     DATASET_DIRECTORY="vui_datasets"
-    CANDIDATES_DIR = f"{DATASET_DIRECTORY}/candidates/"
-    KEYFRAMES_DIR = f"{DATASET_DIRECTORY}/keyframes/"
 
     def __init__(self):
         super().__init__([])
         self.db = sqlite3.connect(f"{App.DATASET_DIRECTORY}/visionUI.db")
-
         self.capture = Capture()
 
+        if len(sys.argv)>1:
+            App.DATASET_DIRECTORY = sys.argv[1]
+        App.CANDIDATES_DIR = f"{App.DATASET_DIRECTORY}/candidates/"
+        App.KEYFRAMES_DIR = f"{App.DATASET_DIRECTORY}/keyframes/"
         if not os.path.exists(App.DATASET_DIRECTORY):
             os.mkdir(App.DATASET_DIRECTORY)
+        if not os.path.exists(App.CANDIDATES_DIR):
+            os.mkdir(App.CANDIDATES_DIR)
+        if not os.path.exists(App.KEYFRAMES_DIR):
+            os.mkdir(App.KEYFRAMES_DIR)
 
         Form, Window = uic.loadUiType("mainwindow.ui")
         self.window = Window()
@@ -101,17 +107,19 @@ class App(QApplication):
         self.poi_lines = list()
         self.current_image_browser_dir = None
         self.current_image_browser_file = None
+        self.selected_file_id = None
 
         self.ml_model = None
         self.current_yolo_results = list()
-
-        for cl in self.request("SELECT * FROM classes;"):
-            self.form.classesList.addItem(f"{cl[3]}\t{cl[1]}:  {cl[2]}")
-            self.form.comboROIclass.addItem(f"{cl[3]}:{cl[1]}")
+        self.refresh_classes_lists()
 
         model = QFileSystemModel(self)
         self.form.candidatesList.setModel(model)
         self.form.candidatesList.setRootIndex(model.setRootPath(App.CANDIDATES_DIR))
+
+        model = QFileSystemModel(self)
+        self.form.keyframesList.setModel(model)
+        self.form.keyframesList.setRootIndex(model.setRootPath(App.KEYFRAMES_DIR))
 
         self.form.listROI.setModel(QStringListModel())
 
@@ -122,17 +130,67 @@ class App(QApplication):
         self.form.buttonStartVideo.clicked.connect(self.start_video)
         self.form.enableYOLO.clicked.connect(self.enable_yolo)
         self.form.selectDirImageButton.clicked.connect(self.set_image_browser_directory)
-        # self.form.createNewDatasetButton.pressed.connect(self.create_new_dataset)
-        # self.form.datasetNameList.activated.connect(self.select_dataset)
-        # self.form.datasetNameEdit.editingFinished.connect(self.update_selected_dataset)
-        # self.form.datasetType.activated.connect(self.update_selected_dataset)
+        self.form.classesList.currentRowChanged.connect(self.update_selected_class_editor)
         self.form.makeCandidateButton.pressed.connect(self.create_candidate)
+        self.form.captureFrameButton.pressed.connect(self.create_candidate)
+        self.form.eraseFrameButton.pressed.connect(self.erase_frame)
         self.form.candidatesList.selectionModel().selectionChanged.connect(self.candidate_image_select)
+        self.form.keyframesList.selectionModel().selectionChanged.connect(self.keyframe_image_select)
         self.form.newClassButton.clicked.connect(self.create_new_class)
         self.form.deleteClassButton.clicked.connect(self.remove_class)
+        self.form.deletePointButton.clicked.connect(self.remove_point)
+        self.form.validateKFButton.clicked.connect(self.validate_keyframe)
+        self.form.invalidateKFButton.clicked.connect(self.invalidate_keyframe)
+        self.form.prepareDatasetButton.clicked.connect(self.prepare_training_files)
 
-        # self.form.annotationsTab.setEnabled(False)
         self.window.show()
+
+    def validate_keyframe(self):
+        if not self.selected_file_id:
+            return
+        kfs = [s for s in os.listdir(App.CANDIDATES_DIR) if s.startswith(self.selected_file_id)]
+        if len(kfs)==0:
+            return
+        os.rename(f"{App.CANDIDATES_DIR}/{kfs[0]}", f"{App.KEYFRAMES_DIR}/{kfs[0]}")
+
+    def invalidate_keyframe(self):
+        if not self.selected_file_id:
+            return
+        kfs = [s for s in os.listdir(App.KEYFRAMES_DIR) if s.startswith(self.selected_file_id)]
+        if len(kfs)==0:
+            return
+        os.rename(f"{App.KEYFRAMES_DIR}/{kfs[0]}", f"{App.CANDIDATES_DIR}/{kfs[0]}")
+
+    def erase_frame(self):
+        if self.selected_file_id:
+            self.request("DELETE FROM annotations WHERE file_id=?", [self.selected_file_id])
+            dl = [s for s in os.listdir(App.CANDIDATES_DIR) if s.startswith(self.selected_file_id)]
+            if len(dl)>0:
+                os.remove(f"{App.CANDIDATES_DIR}/{dl[0]}")
+            self.refresh_annotations_list()
+
+    def refresh_classes_lists(self):
+        self.form.classesList.clear()
+        self.form.comboROIclass.clear()
+        for cl in self.request("SELECT * FROM classes ORDER BY encoding;"):
+            self.form.classesList.addItem(f"{cl[3]}\t{cl[1]}:  {cl[2]}")
+            self.form.comboROIclass.addItem(f"{cl[3]}:{cl[1]}")
+
+    @staticmethod
+    def parse_class_Editor_line(s):
+        arr = s.split("\t")
+        encoding = int(arr[0])
+        name = arr[1].split(":")[0]
+        description = ":".join(arr[1].split(":")[1:])
+        if len(arr)>2:
+            description += "\t".join(arr[2:])
+        return name, description, encoding
+
+    def update_selected_class_editor(self):
+        name, description, encoding = self.parse_class_Editor_line(self.form.classesList.currentItem().data(0))
+        self.form.textClassName.setText(name)
+        self.form.textClassDescription.setText(description)
+        self.form.textClassEncoding.setText(str(encoding))
 
     def request(self, request, args=[]):
         cursor = self.db.cursor()
@@ -144,20 +202,24 @@ class App(QApplication):
 
     def remove_class(self):
         # TODO: check if no annotation uses this class
-        ind = self.form.classesList.selectedIndexes()
-        if len(ind)==0:
-            return
-        ind = ind[0].row()
-        self.classes_model.deleteRowFromTable(ind)
-        self.classes_model.submitAll()
-        self.classes_model.select()
+        name, description, encoding = self.parse_class_Editor_line(self.form.classesList.currentItem().data(0))
+        self.request("DELETE FROM classes WHERE name=?", [name])
+        self.refresh_classes_lists()
 
     def create_new_class(self):
-        cm = self.classes_model
-        row = self.classes_model.rowCount()
-        cm.insertRows(row, 1)
-        cm.submitAll()
-        self.form.classesList.reset()
+        try:
+            encoding = int(self.form.textClassEncoding.text())
+        except ValueError:
+            msg = QMessageBox()
+            msg.setIcon(QMessageBox.Critical)
+            msg.setText("Can't create class")
+            msg.setInformativeText('The encoding is not a valid numer')
+            msg.setWindowTitle("Error")
+            msg.exec_()
+        name = self.form.textClassName.text()
+        description = self.form.textClassDescription.text()
+        self.request("INSERT INTO classes (name, description, encoding) VALUES(?,?,?)", [name, description, encoding])
+        self.refresh_classes_lists()
 
     @staticmethod
     def make_uid():
@@ -176,23 +238,11 @@ class App(QApplication):
             filename = f"{uid}_was_{namepart}.jpg"
 
         fullpath = fulldir+"/"+filename
-        print(fullpath)
         Image.fromarray(self.capture.current_np).save(fullpath)
 
-    # def create_new_dataset(self):
-    #     name = self.form.datasetNameEdit.text()
-    #     cursor = self.db.cursor()
-    #     cursor.execute("SELECT description FROM datasets WHERE description=?", (name,))
-    #     if len(list(cursor.fetchall()))>0:
-    #         QErrorMessage().showMessage(f"A dataset with name '{name}' already exists")
-    #         return
-    #     dataset_type = self.form.datasetType.currentIndex()
-    #     cursor.close()
-    #     cursor = self.db.cursor()
-    #     cursor.execute("INSERT INTO datasets (type, description) VALUES (?, ?)", (dataset_type, name))
-    #     cursor.close()
-    #     self.db.commit()
-    #     self.refresh_datasets_namelist()
+    @staticmethod
+    def get_uid_from_filename(s):
+        return ".".join(s.split(".")[:-1]).split("_was")[0]
 
     def update_statusbar(self):
         self.window.statusBar().showMessage("Capture mode:"+str(self.capture_mode))
@@ -202,11 +252,25 @@ class App(QApplication):
         fullname = self.current_image_browser_dir + "/" + self.current_image_browser_file
         self.capture.open_file(fullname)
 
+    def keyframe_image_select(self):
+        filename_index = self.form.keyframesList.currentIndex()
+        fullname = self.form.keyframesList.model().filePath(filename_index)
+        filename = self.form.keyframesList.model().fileName(filename_index)
+        self.capture.open_file(fullname)
+        self.refresh_video()
+        self.selected_file_id = self.get_uid_from_filename(filename)
+        self.form.labelKFID.setText(self.selected_file_id)
+        self.refresh_annotations_list()
+
     def candidate_image_select(self):
         filename_index = self.form.candidatesList.currentIndex()
         fullname = self.form.candidatesList.model().filePath(filename_index)
+        filename = self.form.candidatesList.model().fileName(filename_index)
         self.capture.open_file(fullname)
         self.refresh_video()
+        self.selected_file_id = self.get_uid_from_filename(filename)
+        self.form.labelKFID.setText(self.selected_file_id)
+        self.refresh_annotations_list()
 
     def set_image_browser_directory(self):
         dir = QFileDialog.getExistingDirectory(caption="Images directory", directory=".")
@@ -270,66 +334,113 @@ class App(QApplication):
         p = self.form.imageView.mapToScene(event.pos())
         x = int(p.x())
         y = int(p.y())
-        print(x,y)
-        print(p)
         self.form.zoomedView.setSceneRect(x - 10, y-10, 20,20)
+
+    def refresh_annotations_list(self):
+        annotations = self.request("SELECT id, type, x,y, class_id FROM annotations WHERE file_id=?", [self.selected_file_id])
+
+        for r in self.poi_lines:
+            self.scene.removeItem(r)
+        self.poi_lines.clear()
+        w = 1#self.background_image_item.boundingRect().width()
+        h = 1#self.background_image_item.boundingRect().height()
+        i = 0
+        selected_index = -1
+        str_list = list()
+        for aid, ty, x, y, cid in annotations:
+            x = x*w
+            y = y*h
+            if ty == 1:
+                anot_type = "POINT"
+            else:
+                anot_type = "UNKOWN"
+            str_list.append(f"{anot_type} {x} {y} {1.0} {cid}")
+            if self.scene_selection and self.scene_selection == aid:
+                color = QColor(255, 0, 0)
+                selected_index = i
+            else:
+                color = QColor(0, 0, 255)
+            self.poi_lines.append(
+                self.scene.addLine(x - 10, y, x + 10, y, color))
+            self.poi_lines.append(
+                self.scene.addLine(x, y - 10, x, y + 10, color))
+            i += 1
+
+        m = QStringListModel(str_list)
+        self.form.listROI.setModel(m)
+        self.form.listROI.setCurrentIndex(m.index(selected_index,0))
 
     def zoomedView_onclick(self, event):
         p = self.form.zoomedView.mapToScene(event.pos())
         x = int(p.x())
         y = int(p.y())
+        x/=self.background_image_item.boundingRect().width()
+        y/=self.background_image_item.boundingRect().height()
+
 
         if self.form.selectPointButton.isChecked():
-            objs = self.form.imageView.items(x-5, y-5, x+5, y+5)
-            if len(objs) < 2:
-                return
-            o = objs[0]
-            ind = self.poi_lines.index(o)
-            ind = int(ind/2)
-            if self.scene_selection:
-                old_ind = self.poi_lines.index(self.scene_selection)//2
-                self.poi_lines[old_ind * 2].setPen(QColor(0, 0, 255))
-                self.poi_lines[old_ind * 2+1].setPen(QColor(0, 0, 255))
-            self.poi_lines[ind * 2].setPen(QColor(255, 0, 0))
-            self.poi_lines[ind * 2+1].setPen(QColor(255, 0, 0))
-            self.scene_selection = o
-            qind = self.form.listROI.model().index(ind, 0)
-            self.form.listROI.setCurrentIndex(qind)
+            annotations = self.request("SELECT id, x,y FROM annotations WHERE file_id=?",
+                                       [self.selected_file_id])
+            mindist=1e9
+            ind = -1
+            for ai, ax, ay in annotations:
+                dist = (ax-x)**2 + (ay-y)**2
+                if dist<mindist:
+                    ind = ai
+                    mindist = dist
+            if ind > -1:
+                self.scene_selection = ind
+                self.refresh_annotations_list()
 
         if self.form.pointCreateButton.isChecked():
-            self.create_point(x, y)
+            obj_class = int(self.form.comboROIclass.currentText().split(":")[0])
+            self.request("INSERT INTO annotations (type, file_id, x, y, class_id) VALUES(1, ?,?,?,?)",
+                         [self.selected_file_id, x, y, obj_class])
+            self.refresh_annotations_list()
 
         if self.form.movePointButton.isChecked():
             if self.scene_selection:
-                ind = self.poi_lines.index(self.scene_selection)//2
-                obj = self.poi_lines[ind * 2]
-                obj.setLine(x - 10, y, x + 10, y)
-                obj = self.poi_lines[ind * 2+1]
-                obj.setLine(x, y - 10, x, y + 10)
-                s = self.form.listROI.model().stringList()[ind]
-                print(s)
-                print(s.rstrip().split(" ")[-1])
-                m=self.form.listROI.model()
-                m.setData(m.index(ind,0), f"{x} {y} {1} {1} {1.0} {s.rstrip().split(' ')[-1]}")
+                self.request("UPDATE annotations SET x=?, y=? WHERE id=?",
+                             [x,y,self.scene_selection])
+                self.refresh_annotations_list()
 
-    def create_point(self, x, y):
-        obj_class = self.form.comboROIclass.currentText().split(":")[0]
-        print("class:", obj_class)
-        self.request("SELECT * FROM classes WHERE encoding=?", [obj_class])
-        self.poi_lines.append(
-            self.scene.addLine(x - 10, y, x + 10, y, QColor(0, 0, 255)))
-        self.poi_lines.append(
-            self.scene.addLine(x, y - 10, x, y + 10, QColor(0, 0, 255)))
-        m = self.form.listROI.model()
-        if m.insertRow(m.rowCount()):
-            ind = m.index(m.rowCount() - 1, 0)
-            m.setData(ind, f"{x} {y} {1} {1} {1.0} {obj_class}")
+    def remove_point(self):
+        if self.scene_selection:
+            self.request("DELETE FROM annotations WHERE id=?",
+                         [self.scene_selection])
+            self.scene_selection = None
+            self.refresh_annotations_list()
 
-    def refresh_roi_scene(self):
-        self.request("SELECT * FROM annotated_file,  WHERE name=?", (obj_class))
+    def prepare_training_files(self):
+        # Write YAML
+        p = Path(App.DATASET_DIRECTORY)
+        filename = p / "dataset.yaml"
+        results = self.request("SELECT name, encoding FROM classes ORDER BY encoding;")
+        classes = {e:c for c,e in results}
+        s = ""
+        s += f"""path: {p.resolve()} # dataset root dir
+train: keyframes/ # train images relative to path
+val: keyframes/ # validation images relative to path
+test: 
 
+nc {len(classes)}
+names: {str(list(classes.values()))}
+"""
+        yamlfile = open(filename, "w")
+        yamlfile.write(s)
+        yamlfile.close()
 
-
+        # Write classes.txt
+        # Write labels txt files
+        if not os.path.exists(p/"labels"):
+            os.mkdir(p/"labels")
+        for fn in os.listdir(p / "keyframes"):
+            label_file = open((p/"labels"/fn).with_suffix(".txt"), "w")
+            annotations = self.request("SELECT x,y,class_id FROM annotations WHERE file_id=?", [str(Path(fn).with_suffix(""))])
+            for x, y, cid in annotations:
+                label_file.write(f"{list(classes.keys()).index(cid)} {x} {y} 0.03 0.03\n")
+            fn.split()
+        return
 
 app = App()
 app.exec_()
