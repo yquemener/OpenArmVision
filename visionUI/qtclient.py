@@ -17,11 +17,21 @@ import time
 import sqlite3
 import os
 from pathlib import Path
+import yolov5
+import yolov5.train
 
 # Hack to make PyQt and cv2 load simultaneously
 os.environ["QT_QPA_PLATFORM_PLUGIN_PATH"] = os.fspath(
     Path(PyQt5.__file__).resolve().parent / "Qt5" / "plugins"
 )
+
+# exp73: XY only, ComputeLoss
+
+# TODO: Connect the "refresh model" button!
+# TODO: put the runs in the dataset path
+# TODO: paths for yolov5 in a variable
+# TODO: put training in a thread
+# TODO: Add manual focus widget + 50/60 Hz compensation
 
 
 class Capture:
@@ -68,12 +78,15 @@ class Capture:
 
 
 class App(QApplication):
-    DATASET_DIRECTORY="vui_datasets"
+    DATASET_DIRECTORY="screws_dataset"
 
     def __init__(self):
         super().__init__([])
+
         self.db = sqlite3.connect(f"{App.DATASET_DIRECTORY}/visionUI.db")
+        self.populate_db()
         self.capture = Capture()
+        self.training_resume_weights = None
 
         if len(sys.argv)>1:
             App.DATASET_DIRECTORY = sys.argv[1]
@@ -143,8 +156,51 @@ class App(QApplication):
         self.form.validateKFButton.clicked.connect(self.validate_keyframe)
         self.form.invalidateKFButton.clicked.connect(self.invalidate_keyframe)
         self.form.prepareDatasetButton.clicked.connect(self.prepare_training_files)
+        self.form.trainButton.clicked.connect(self.train_epochs)
+        self.form.selectInferenceWeightsButton.clicked.connect(self.select_infererence_model)
+        self.form.selectTrainingWeightsButton.clicked.connect(self.select_training_model)
+        self.form.refreshModelsButton.clicked.connect(self.refresh_models_list)
+
+        # Quick hack for VECTOR selection/creation
+        self.vector_p1 = None
+        self.vector_p2 = None
+        self.vector_selection_state = 0
+        self.refresh_models_list()
 
         self.window.show()
+
+    def refresh_models_list(self):
+        self.form.weightsList.clear()
+        self.form.weightsList.addItem("Pre-trained YOLOv5 small")
+        for exp in sorted(os.listdir("../yolov5/runs/train")):
+            path = f"../yolov5/runs/train/{exp}/weights"
+            if os.path.exists(path):
+                for pt in sorted(os.listdir(path)):
+                    if pt.endswith(".pt"):
+                        self.form.weightsList.addItem(f"{path}/{pt}")
+
+    def populate_db(self):
+        ret = self.request("SELECT name FROM sqlite_master WHERE type='table' AND name='annotations';")
+        if len(ret)==0:
+            req = """CREATE TABLE "annotations" (
+                "id"	INTEGER PRIMARY KEY AUTOINCREMENT,
+                "file_id"	TEXT,
+                "type"	INTEGER,
+                "x"	NUMERIC,
+                "y"	NUMERIC,
+                "class_id"	INTEGER,
+                "confidence"	NUMERIC NOT NULL DEFAULT 1.0
+            )"""
+            self.request(req)
+        ret = self.request("SELECT name FROM sqlite_master WHERE type='table' AND name='classes';")
+        if len(ret)==0:
+            req = """CREATE TABLE "classes" (
+                "id"	INTEGER PRIMARY KEY AUTOINCREMENT,
+                "name"	TEXT,
+                "description"	TEXT,
+                "encoding"	INTEGER
+            )"""
+            self.request(req)
 
     def validate_keyframe(self):
         if not self.selected_file_id:
@@ -238,6 +294,14 @@ class App(QApplication):
             namepart = ".".join(self.current_image_browser_file.split(".")[:-1])
             filename = f"{uid}_was_{namepart}.jpg"
 
+        if self.form.enableYOLO.isChecked():
+            w = self.background_image_item.boundingRect().width()
+            h = self.background_image_item.boundingRect().height()
+            for r in self.current_yolo_results:
+                x,y,_,_,_,cid = r.split(" ")[0:6]
+                self.request("INSERT INTO annotations (type, file_id, x, y, class_id) VALUES(1, ?,?,?,?)",
+                             [uid, float(x)/w, float(y)/h, int(cid)])
+
         fullpath = fulldir+"/"+filename
         Image.fromarray(self.capture.current_np).save(fullpath)
 
@@ -304,14 +368,20 @@ class App(QApplication):
             for r in self.poi_lines:
                 self.scene.removeItem(r)
             self.poi_lines.clear()
-            for r in results.xywh[0]:
+            # for r in results.xywh[0]:
+            for r in results.xyxy[0]:
                 arr = r.detach().tolist()
                 self.current_yolo_results.append(f"{int(arr[0])} {int(arr[1])} {int(arr[2])} {int(arr[3])} {arr[4]:.3f} {int(arr[5])} ")
-                self.poi_lines.append(self.scene.addLine(r[0]-10, r[1], r[0]+10, r[1],
-                                                         QColor(255,0,0)))
-                self.poi_lines.append(self.scene.addLine(r[0], r[1]-10, r[0], r[1]+10,
+                # self.poi_lines.append(self.scene.addLine(r[0]-10, r[1], r[0]+10, r[1],
+                #                                          QColor(255,0,0)))
+                # self.poi_lines.append(self.scene.addLine(r[0], r[1]-10, r[0], r[1]+10,
+                #                                          QColor(255, 0, 0)))
+
+                self.poi_lines.append(self.scene.addLine(r[0], r[1], r[2], r[3],
                                                          QColor(255, 0, 0)))
-            self.form.listROI.clear()
+                self.poi_lines.append(self.scene.addEllipse(r[0]-5, r[1]-5, 10,10,
+                                                            QColor(255, 0, 0)))
+                self.form.listROI.clear()
             self.form.listROI.addItems(self.current_yolo_results)
             # self.form.listROI.model().dataChanged.emit(QModelIndex(), QModelIndex())
         if not self.form.pauseButton.isChecked():
@@ -326,20 +396,37 @@ class App(QApplication):
 
     def enable_yolo(self):
         if self.form.enableYOLO.isChecked() and self.ml_model is None:
-            # print(os.get_cwd)
-            # print(os.listdir(""))
             self.ml_model = torch.hub.load('../yolov5/', 'custom',
-                                           path='../yolov5/runs/train/exp13/weights/best.pt',
+                                           path='../yolov5/runs/train/exp44/weights/best.pt',
                                            source='local')
 
+    def select_infererence_model(self):
+        model_path = self.form.weightsList.currentItem().text()
+        if os.path.exists(model_path):
+            self.ml_model = torch.hub.load('../yolov5/', 'custom',
+                                           path=model_path,
+                                           source='local')
+
+    def select_training_model(self):
+        model_path = self.form.weightsList.currentItem().text()
+        if os.path.exists(model_path):
+            self.training_resume_weights=model_path
+
     def imageView_onclick(self, event):
-        p = self.form.imageView.mapToScene(event.pos())
-        x = int(p.x())
-        y = int(p.y())
-        self.form.zoomedView.setSceneRect(x - 10, y-10, 20,20)
+        modifiers = QApplication.keyboardModifiers()
+        if modifiers == Qt.ControlModifier:
+            p = self.form.imageView.mapToScene(event.pos())
+            x = int(p.x())
+            y = int(p.y())
+            self.form.zoomedView.setSceneRect(x - 10, y-10, 20,20)
+        else:
+            p = self.form.imageView.mapToScene(event.pos())
+            x = int(p.x())
+            y = int(p.y())
+            self.scene_onclick(x, y)
 
     def refresh_annotations_list(self):
-        annotations = self.request("SELECT id, type, x,y, class_id FROM annotations WHERE file_id=? ORDER BY id", [self.selected_file_id])
+        annotations = self.request("SELECT id, type, x,y, x2,y2, class_id FROM annotations WHERE file_id=? ORDER BY id", [self.selected_file_id])
         for r in self.poi_lines:
             self.scene.removeItem(r)
         self.poi_lines.clear()
@@ -348,37 +435,48 @@ class App(QApplication):
         i = 0
         selected_index = -1
         str_list = list()
-        for aid, ty, x, y, cid in annotations:
+        for aid, ty, x, y, x2, y2, cid in annotations:
             x = round(x*w)
             y = round(y*h)
-            if ty == 1:
-                anot_type = "POINT"
-            else:
-                anot_type = "UNKOWN"
-            str_list.append(f"{anot_type} {x} {y} {1.0} {cid}")
+            x2 = round(x2*w)
+            y2 = round(y2*h)
             if self.scene_selection and self.scene_selection == aid:
                 color = QColor(255, 0, 0)
                 selected_index = i
             else:
                 color = QColor(0, 0, 255)
-            self.poi_lines.append(
-                self.scene.addLine(x - 10, y, x + 10, y, color))
-            self.poi_lines.append(
-                self.scene.addLine(x, y - 10, x, y + 10, color))
+            if ty == 1:
+                anot_type = "POINT"
+                str_list.append(f"{anot_type} {x} {y} {1.0} {cid}")
+                self.poi_lines.append(
+                    self.scene.addLine(x - 10, y, x + 10, y, color))
+                self.poi_lines.append(
+                    self.scene.addLine(x, y - 10, x, y + 10, color))
+            elif ty == 2:
+                anot_type = "VECTOR"
+                str_list.append(f"{anot_type} {x} {y} {x2} {y2} {1.0} {cid}")
+                self.poi_lines.append(
+                    self.scene.addLine(x, y, x2, y2, color))
+                self.poi_lines.append(
+                    self.scene.addEllipse(x-5, y-5, 10, 10, color))
+            else:
+                anot_type = "UNKOWN"
+                str_list.append(f"{anot_type} {x} {y} {x2} {y2} {1.0} {cid}")
             i += 1
 
         self.form.listROI.clear()
         self.form.listROI.addItems(str_list)
         self.form.listROI.setCurrentRow(selected_index)
 
-
     def zoomedView_onclick(self, event):
         p = self.form.zoomedView.mapToScene(event.pos())
         x = int(p.x())
         y = int(p.y())
-        x/=self.background_image_item.boundingRect().width()
-        y/=self.background_image_item.boundingRect().height()
+        self.scene_onclick(x, y)
 
+    def scene_onclick(self, x, y):
+        x /= self.background_image_item.boundingRect().width()
+        y /= self.background_image_item.boundingRect().height()
 
         if self.form.selectPointButton.isChecked():
             annotations = self.request("SELECT id, x,y FROM annotations WHERE file_id=?",
@@ -394,11 +492,24 @@ class App(QApplication):
                 self.scene_selection = ind
                 self.refresh_annotations_list()
 
+        # correct for a POINT but hastily hacking that to make it work with VECTOR by default
+        # if self.form.pointCreateButton.isChecked():
+        #     obj_class = int(self.form.comboROIclass.currentText().split(":")[0])
+        #     self.request("INSERT INTO annotations (type, file_id, x, y, class_id) VALUES(1, ?,?,?,?)",
+        #                  [self.selected_file_id, x, y, obj_class])
+        #     self.refresh_annotations_list()
+
         if self.form.pointCreateButton.isChecked():
             obj_class = int(self.form.comboROIclass.currentText().split(":")[0])
-            self.request("INSERT INTO annotations (type, file_id, x, y, class_id) VALUES(1, ?,?,?,?)",
-                         [self.selected_file_id, x, y, obj_class])
-            self.refresh_annotations_list()
+            if self.vector_selection_state == 0:
+                self.vector_p1 = (x,y)
+                self.vector_selection_state = 1
+            elif self.vector_selection_state == 1:
+                self.vector_p2 = (x, y)
+                self.request("INSERT INTO annotations (type, file_id, x, y, x2, y2, class_id) VALUES(2, ?,?,?,?,?,?)",
+                             [self.selected_file_id, self.vector_p1[0], self.vector_p1[1], x, y, obj_class])
+                self.refresh_annotations_list()
+                self.vector_selection_state = 0
 
         if self.form.movePointButton.isChecked():
             if self.scene_selection:
@@ -438,11 +549,25 @@ names: {str(list(classes.values()))}
             os.mkdir(p/"labels")
         for fn in os.listdir(App.KEYFRAMES_DIR):
             label_file = open((p/"labels"/fn).with_suffix(".txt"), "w")
-            annotations = self.request("SELECT x,y,class_id FROM annotations WHERE file_id=?", [str(Path(fn).with_suffix(""))])
-            for x, y, cid in annotations:
-                label_file.write(f"{list(classes.keys()).index(cid)} {x} {y} 0.03 0.03\n")
+            annotations = self.request("SELECT x,y,x2,y2,class_id FROM annotations WHERE file_id=?", [str(Path(fn).with_suffix(""))])
+            for x, y, x2, y2, cid in annotations:
+                label_file.write(f"{list(classes.keys()).index(cid)} {x} {y} {0.03} {0.03}\n")
             fn.split()
         return
+
+    def train_epochs(self):
+        p = Path(App.DATASET_DIRECTORY)
+        try:
+            epochs = int(self.form.epochNumText.text())
+        except ValueError:
+            return
+        weights = ""
+        if self.training_resume_weights:
+            weights = self.training_resume_weights
+        yolov5.train.run(data=p / "dataset.yaml",
+                         cfg="yolov5s.yaml",
+                         weights=weights,
+                         batch_size=8, epochs=epochs, patience=50)
 
     def select_annotation_from_list(self):
         annotations = self.request("SELECT id FROM annotations WHERE file_id=? ORDER BY id",
