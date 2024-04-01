@@ -680,7 +680,7 @@ names: {str(list(classes.values()))}
                 if x2 and y2:
                     label_file.write(f"{list(classes.keys()).index(cid)} {x} {y} {x2} {y2}\n")
                 else:
-                    label_file.write(f"{list(classes.keys()).index(cid)} {x} {y} 0.01 0.01\n")
+                    label_file.write(f"{list(classes.keys()).index(cid)} {x} {y} 0.05 0.05\n")
             fn.split()
         return
 
