@@ -17,8 +17,14 @@ import time
 import sqlite3
 import os
 from pathlib import Path
+
+from torchvision.transforms import transforms
+from torchvision.transforms.functional import to_pil_image
+
 import yolov5
 import yolov5.train
+import multi_obj
+import torchvision
 
 # Hack to make PyQt and cv2 load simultaneously
 os.environ["QT_QPA_PLATFORM_PLUGIN_PATH"] = os.fspath(
@@ -26,12 +32,19 @@ os.environ["QT_QPA_PLATFORM_PLUGIN_PATH"] = os.fspath(
 )
 
 # exp73: XY only, ComputeLoss
+# exp99: XY only, Vector2dLoss
+# exp111: XY bad, wh almost random, Vector2dLoss
+# exp114: XY bof, wh almost random, latest, Vector2dLoss
+# exp118: XY moyen, wh moyen, Vector2dLoss
+# exp122: XY moyen, wh moyen, Vector2dLoss
+# exp129: XY moyen+, wh moyen, latest, Vector2dLoss
 
 # TODO: Connect the "refresh model" button!
 # TODO: put the runs in the dataset path
 # TODO: paths for yolov5 in a variable
 # TODO: put training in a thread
 # TODO: Add manual focus widget + 50/60 Hz compensation
+# TODO: Erase labels files when regenerating the dataset
 
 
 class Capture:
@@ -157,7 +170,7 @@ class App(QApplication):
         self.form.invalidateKFButton.clicked.connect(self.invalidate_keyframe)
         self.form.prepareDatasetButton.clicked.connect(self.prepare_training_files)
         self.form.trainButton.clicked.connect(self.train_epochs)
-        self.form.selectInferenceWeightsButton.clicked.connect(self.select_infererence_model)
+        self.form.selectInferenceWeightsButton.clicked.connect(self.select_inference_model)
         self.form.selectTrainingWeightsButton.clicked.connect(self.select_training_model)
         self.form.refreshModelsButton.clicked.connect(self.refresh_models_list)
 
@@ -178,6 +191,11 @@ class App(QApplication):
                 for pt in sorted(os.listdir(path)):
                     if pt.endswith(".pt"):
                         self.form.weightsList.addItem(f"{path}/{pt}")
+        path = f"/home/yves/Projects/active/HLA/OpenArmVision/models/"
+        if os.path.exists(path):
+            for pt in sorted(os.listdir(path)):
+                if pt.endswith(".bin"):
+                    self.form.weightsList.addItem(f"{path}/{pt}")
 
     def populate_db(self):
         ret = self.request("SELECT name FROM sqlite_master WHERE type='table' AND name='annotations';")
@@ -363,23 +381,71 @@ class App(QApplication):
             qimg = QImage(img.data, img.shape[1], img.shape[0], img.shape[1]*3, QImage.Format_RGB888)
             self.background_image_item.setPixmap(QPixmap(qimg))
         if self.form.enableYOLO.isChecked():
-            results = self.ml_model(self.capture.current_np)
+            if self.form.modelType.currentText() == "YOLO":
+                self.ml_model.eval()
+                with torch.no_grad():
+                    results = self.ml_model(self.capture.current_np).xyxy[0]
+                results = results.detach().tolist()
+
+            elif self.form.modelType.currentText() == "multi_obj":
+                imgt = transforms.Resize((512, 512))(to_pil_image(self.capture.current_np))
+                imgt = torch.Tensor(np.array(imgt)).unsqueeze(0).view(1,3,512,512).cuda()
+                self.ml_model.eval()
+                with torch.no_grad():
+                    res = self.ml_model(imgt)
+                thresh = self.form.yoloThresholdSlider.value()/1000.
+                results = list()
+                for i in range(res.shape[1]):
+                    for j in range(res.shape[2]):
+                        arr = res[0, i, j].detach().tolist()
+                        if arr[0] < thresh:
+                            continue
+                        arr = arr[1:]
+                        arr[0] = (arr[0] + j + 0.5) * 640 / res.shape[1]
+                        arr[1] = (arr[1] + i + 0.5) * 480 / res.shape[2]
+                        arr[2] = arr[0] + arr[2] * 640
+                        arr[3] = arr[1] + arr[3] * 480
+                        results.append(arr)
+
+
+                # results = results[:, :, :, 1:][results[:,:,:,0]>0].view(-1,5)
+                # results = results.detach().cpu().numpy()
+                # results[:, 0:2] *= np.array((640,480))
+
+
             self.current_yolo_results.clear()
             for r in self.poi_lines:
                 self.scene.removeItem(r)
             self.poi_lines.clear()
-            # for r in results.xywh[0]:
-            for r in results.xyxy[0]:
-                arr = r.detach().tolist()
-                self.current_yolo_results.append(f"{int(arr[0])} {int(arr[1])} {int(arr[2])} {int(arr[3])} {arr[4]:.3f} {int(arr[5])} ")
+            for arr in results:
+            # for r in results[:,:,:,1:][results[:,:,:,0]>0].view(-1,5):
+
+                arr[2] = arr[0]+arr[2]*640
+                arr[3] = arr[1]+arr[3]*480
+
+
+            # for i in range(results.shape[1]):
+            #     for j in range(results.shape[2]):
+            #         arr = results[0, i, j].detach().tolist()
+            #         if arr[0] < thresh:
+            #             continue
+            #         arr = arr[1:]
+            #         print(arr)
+            #         arr[0] = (arr[0] + j + 0.5) * 640 / results.shape[1]
+            #         arr[1] = (arr[1] + i + 0.5) * 480 / results.shape[2]
+            #         arr[2] = arr[0] + arr[2] * 640
+            #         arr[3] = arr[1] + arr[3] * 480
+            #         print(arr)
+            #         print()
+                self.current_yolo_results.append(f"{int(arr[0])} {int(arr[1])} {int(arr[2])} {int(arr[3])} {arr[4]:.3f}")
                 # self.poi_lines.append(self.scene.addLine(r[0]-10, r[1], r[0]+10, r[1],
                 #                                          QColor(255,0,0)))
                 # self.poi_lines.append(self.scene.addLine(r[0], r[1]-10, r[0], r[1]+10,
                 #                                          QColor(255, 0, 0)))
 
-                self.poi_lines.append(self.scene.addLine(r[0], r[1], r[2], r[3],
+                self.poi_lines.append(self.scene.addLine(arr[0], arr[1], arr[2], arr[3],
                                                          QColor(255, 0, 0)))
-                self.poi_lines.append(self.scene.addEllipse(r[0]-5, r[1]-5, 10,10,
+                self.poi_lines.append(self.scene.addEllipse(arr[0]-5, arr[1]-5, 10,10,
                                                             QColor(255, 0, 0)))
                 self.form.listROI.clear()
             self.form.listROI.addItems(self.current_yolo_results)
@@ -399,13 +465,20 @@ class App(QApplication):
             self.ml_model = torch.hub.load('../yolov5/', 'custom',
                                            path='../yolov5/runs/train/exp44/weights/best.pt',
                                            source='local')
+            # num_classes = 1
+            # grid_size = 16
+            # grid_size = 16
+            # model = multi_obj.CustomYOLO(num_classes, grid_size=grid_size)
+            # self.ml_model = torch.load("/home/yves/Projects/active/HLA/OpenArmVision/visionUI/model_colab_best.bin")
 
-    def select_infererence_model(self):
+    def select_inference_model(self):
         model_path = self.form.weightsList.currentItem().text()
-        if os.path.exists(model_path):
+        if os.path.exists(model_path) and model_path.endswith(".pt"):
             self.ml_model = torch.hub.load('../yolov5/', 'custom',
                                            path=model_path,
                                            source='local')
+        elif os.path.exists(model_path) and model_path.endswith(".bin"):
+            self.ml_model = torch.load(model_path)
 
     def select_training_model(self):
         model_path = self.form.weightsList.currentItem().text()
@@ -551,7 +624,7 @@ names: {str(list(classes.values()))}
             label_file = open((p/"labels"/fn).with_suffix(".txt"), "w")
             annotations = self.request("SELECT x,y,x2,y2,class_id FROM annotations WHERE file_id=?", [str(Path(fn).with_suffix(""))])
             for x, y, x2, y2, cid in annotations:
-                label_file.write(f"{list(classes.keys()).index(cid)} {x} {y} {0.03} {0.03}\n")
+                label_file.write(f"{list(classes.keys()).index(cid)} {x} {y} {x2-x} {y2-y}\n")
             fn.split()
         return
 
@@ -567,6 +640,9 @@ names: {str(list(classes.values()))}
         yolov5.train.run(data=p / "dataset.yaml",
                          cfg="yolov5s.yaml",
                          weights=weights,
+                         # evolve=0,
+                         optimizer='AdamW',
+                         freeze=list(range(10)),
                          batch_size=8, epochs=epochs, patience=50)
 
     def select_annotation_from_list(self):

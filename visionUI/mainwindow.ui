@@ -76,7 +76,7 @@
         </sizepolicy>
        </property>
        <property name="currentIndex">
-        <number>2</number>
+        <number>1</number>
        </property>
        <widget class="QWidget" name="tab">
         <attribute name="title">
@@ -449,11 +449,25 @@
               <item>
                <widget class="QPushButton" name="enableYOLO">
                 <property name="text">
-                 <string>Enable inference</string>
+                 <string>Enable Inference</string>
                 </property>
                 <property name="checkable">
                  <bool>true</bool>
                 </property>
+               </widget>
+              </item>
+              <item>
+               <widget class="QComboBox" name="modelType">
+                <item>
+                 <property name="text">
+                  <string>YOLO</string>
+                 </property>
+                </item>
+                <item>
+                 <property name="text">
+                  <string>multi_obj</string>
+                 </property>
+                </item>
                </widget>
               </item>
               <item>
