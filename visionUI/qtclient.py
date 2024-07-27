@@ -21,8 +21,9 @@ from pathlib import Path
 from torchvision.transforms import transforms
 from torchvision.transforms.functional import to_pil_image
 
-import yolov5
-import yolov5.train
+import thirdparty.yolov5 as yolov5
+import thirdparty.yolov5.train as yolov5_train
+
 import multi_obj
 import torchvision
 
@@ -47,6 +48,7 @@ os.environ["QT_QPA_PLATFORM_PLUGIN_PATH"] = os.fspath(
 # TODO: Erase labels files when regenerating the dataset
 
 
+
 class Capture:
     SOURCE_TYPE_NONE = 0
     SOURCE_TYPE_CAMERA = 1
@@ -59,7 +61,7 @@ class Capture:
         self.last_capture = None
         self.needs_refresh = False
         self.current_np = None
-
+        self.frame_num = 0
     def open_camera(self, index):
         if self.source_type == Capture.SOURCE_TYPE_CAMERA or self.video_capture is not None:
             self.video_capture.release()
@@ -86,6 +88,7 @@ class Capture:
             if self.source_type == Capture.SOURCE_TYPE_FILE:
                 if self.file_path is not None:
                     self.current_np = np.array(Image.open(self.file_path))
+            self.frame_num+=1
             self.last_capture = time.time()
             self.needs_refresh = False
 
@@ -134,6 +137,7 @@ class App(QApplication):
         self.current_image_browser_dir = None
         self.current_image_browser_file = None
         self.selected_file_id = None
+        self.last_processed_frame = 0
 
         self.ml_model = None
         self.current_yolo_results = list()
@@ -178,6 +182,8 @@ class App(QApplication):
         self.form.refreshModelsButton.clicked.connect(self.refresh_models_list)
         self.form.autosaveButton.clicked.connect(self.autosave)
 
+        self.video_changed = False
+
         shortcut = QShortcut(self.window)
         shortcut.setKey(QKeySequence("Del"))
         shortcut.setContext(Qt.ApplicationShortcut)
@@ -205,15 +211,15 @@ class App(QApplication):
 
     def autosave(self):
         if self.form.autosaveButton.isChecked():
-            self.autosave_timer.start(5000)
+            self.autosave_timer.start(1000)
         else:
             self.autosave_timer.stop()
 
     def refresh_models_list(self):
         self.form.weightsList.clear()
         self.form.weightsList.addItem("Pre-trained YOLOv5 small")
-        for exp in sorted(os.listdir("../yolov5/runs/train")):
-            path = f"../yolov5/runs/train/{exp}/weights"
+        for exp in sorted(os.listdir("thirdparty/yolov5/runs/train")):
+            path = f"thirdparty/yolov5/runs/train/{exp}/weights"
             if os.path.exists(path):
                 for pt in sorted(os.listdir(path)):
                     if pt.endswith(".pt"):
@@ -256,6 +262,7 @@ class App(QApplication):
         if len(kfs)==0:
             return
         os.rename(f"{App.CANDIDATES_DIR}/{kfs[0]}", f"{App.KEYFRAMES_DIR}/{kfs[0]}")
+        self.video_changed = True
 
     def invalidate_keyframe(self):
         if not self.selected_file_id:
@@ -264,6 +271,7 @@ class App(QApplication):
         if len(kfs)==0:
             return
         os.rename(f"{App.KEYFRAMES_DIR}/{kfs[0]}", f"{App.CANDIDATES_DIR}/{kfs[0]}")
+        self.video_changed = True
 
     def erase_frame(self):
         if self.selected_file_id:
@@ -271,6 +279,8 @@ class App(QApplication):
             dl = [s for s in os.listdir(App.CANDIDATES_DIR) if s.startswith(self.selected_file_id)]
             if len(dl)>0:
                 os.remove(f"{App.CANDIDATES_DIR}/{dl[0]}")
+            self.video_changed = True
+
             self.refresh_annotations_list()
 
     def refresh_classes_lists(self):
@@ -341,6 +351,8 @@ class App(QApplication):
             namepart = ".".join(self.current_image_browser_file.split(".")[:-1])
             filename = f"{uid}_was_{namepart}.jpg"
 
+        self.video_changed = True
+
         if self.form.enableYOLO.isChecked():
             w = self.background_image_item.boundingRect().width()
             h = self.background_image_item.boundingRect().height()
@@ -363,24 +375,33 @@ class App(QApplication):
         self.current_image_browser_file=index.data()
         fullname = self.current_image_browser_dir + "/" + self.current_image_browser_file
         self.capture.open_file(fullname)
+        self.video_changed = True
+        self.refresh_video()
 
     def keyframe_image_select(self):
         filename_index = self.form.keyframesList.currentIndex()
         fullname = self.form.keyframesList.model().filePath(filename_index)
         filename = self.form.keyframesList.model().fileName(filename_index)
         self.capture.open_file(fullname)
+        self.video_changed = True
         self.refresh_video()
         self.selected_file_id = self.get_uid_from_filename(filename)
         self.refresh_annotations_list()
 
     def candidate_image_select(self):
+        print("asd")
         filename_index = self.form.candidatesList.currentIndex()
         fullname = self.form.candidatesList.model().filePath(filename_index)
         filename = self.form.candidatesList.model().fileName(filename_index)
         self.capture.open_file(fullname)
+        self.video_changed = True
+        print(filename, self.video_changed, self.form.enableYOLO.isChecked())
         self.refresh_video()
+        print(filename, self.video_changed)
         self.selected_file_id = self.get_uid_from_filename(filename)
-        self.refresh_annotations_list()
+        if not self.form.enableYOLO.isChecked():
+            self.refresh_annotations_list()
+        print("asd")
 
     def set_image_browser_directory(self):
         dir = QFileDialog.getExistingDirectory(caption="Images directory", directory=".")
@@ -392,6 +413,7 @@ class App(QApplication):
         self.form.BrowseImageList.setModel(browse_image_model)
         self.form.BrowseImageList.setRootIndex(browse_image_model.index(dir))
         self.form.BrowseImageList.selectionModel().currentChanged.connect(self.image_browser_select)
+        self.video_changed = True
 
     def start_video(self):
         ind = self.form.videoIndex.text()
@@ -409,11 +431,16 @@ class App(QApplication):
             img = self.capture.current_np
             qimg = QImage(img.data, img.shape[1], img.shape[0], img.shape[1]*3, QImage.Format_RGB888)
             self.background_image_item.setPixmap(QPixmap(qimg))
-        if self.form.enableYOLO.isChecked():
+
+        if self.form.enableYOLO.isChecked() and self.last_processed_frame!=self.capture.frame_num:
+            print("Yup")
+            self.last_processed_frame = self.capture.frame_num
+            self.video_changed = False
             if self.form.modelType.currentText() == "YOLO":
                 self.ml_model.eval()
                 with torch.no_grad():
                     results = self.ml_model(self.capture.current_np).xyxy[0]
+                    print(time.time())
                 results = results.detach().tolist()
 
             elif self.form.modelType.currentText() == "multi_obj":
@@ -447,7 +474,7 @@ class App(QApplication):
                 self.scene.removeItem(r)
             self.poi_lines.clear()
             for arr in results:
-
+                print(arr)
                 # arr[2] = arr[0]+arr[2]*640
                 # arr[3] = arr[1]+arr[3]*480
 
@@ -475,10 +502,14 @@ class App(QApplication):
                 #                                          QColor(255, 0, 0)))
                 # self.poi_lines.append(self.scene.addEllipse(arr[0]-5, arr[1]-5, 10,10,
                 #                                             QColor(255, 0, 0)))
+                color = QColor(255, 0, 0)
+                if arr[5]==0.0:
+                    color = QColor(0,255,0)
                 self.poi_lines.append(self.scene.addRect(arr[0], arr[1], arr[2]-arr[0], arr[3]-arr[1],
-                                                         QColor(255, 0, 0)))
+                                                         color))
                 self.form.listROI.clear()
             self.form.listROI.addItems(self.current_yolo_results)
+            print("added")
             # self.form.listROI.model().dataChanged.emit(QModelIndex(), QModelIndex())
         if not self.form.pauseButton.isChecked():
             self.refresh_timer.start(16)
@@ -488,12 +519,14 @@ class App(QApplication):
         self.form.yoloThresholdLabel.setText(f"{value:.3f}")
         if self.ml_model is not None:
             self.ml_model.conf = value
+        self.video_changed = True
         self.refresh_video()
 
     def enable_yolo(self):
+        self.video_changed = True
         if self.form.enableYOLO.isChecked() and self.ml_model is None:
-            self.ml_model = torch.hub.load('../yolov5/', 'custom',
-                                           path='../yolov5/runs/train/exp44/weights/best.pt',
+            self.ml_model = torch.hub.load('thirdparty/yolov5/', 'custom',
+                                           path='thirdparty/runs/train/exp167/weights/best.pt',
                                            source='local')
             # num_classes = 1
             # grid_size = 16
@@ -504,7 +537,7 @@ class App(QApplication):
     def select_inference_model(self):
         model_path = self.form.weightsList.currentItem().text()
         if os.path.exists(model_path) and model_path.endswith(".pt"):
-            self.ml_model = torch.hub.load('../yolov5/', 'custom',
+            self.ml_model = torch.hub.load('thirdparty/yolov5/', 'custom',
                                            path=model_path,
                                            source='local')
         elif os.path.exists(model_path) and model_path.endswith(".bin"):
@@ -693,7 +726,7 @@ names: {str(list(classes.values()))}
         weights = ""
         if self.training_resume_weights:
             weights = self.training_resume_weights
-        yolov5.train.run(data=p / "dataset.yaml",
+        yolov5_train.run(data=p / "dataset.yaml",
                          cfg="yolov5s.yaml",
                          weights=weights,
                          # evolve=0,
