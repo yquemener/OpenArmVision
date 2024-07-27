@@ -101,6 +101,9 @@ class Capture(QObject):
         self.last_capture_time = time.time()
         self.new_frame.emit(frame_num)
 
+    def stop_video(self):
+        self.video_thread.running = False
+
 
 class App(QApplication):
     DATASET_DIRECTORY="vhelio_holes"
@@ -163,11 +166,12 @@ class App(QApplication):
         self.form.listROI.clicked.connect(self.select_annotation_from_list)
 
         self.capture.new_frame.connect(self.refresh_video)
-        self.capture.new_frame.connect(self.refresh_yolo)
+        self.capture.new_frame.connect(self.refresh_annotations_list)
 
         self.autosave_timer = QTimer(self)
         self.autosave_timer.timeout.connect(self.create_candidate)
 
+        self.form.stopButton.clicked.connect(self.capture.stop_video)
         self.form.changeClassButton.clicked.connect(self.change_selection_class)
         self.form.yoloThresholdSlider.valueChanged.connect(self.change_yolo_threshold)
         self.form.buttonStartVideo.clicked.connect(self.start_video)
@@ -391,6 +395,7 @@ class App(QApplication):
         filename = self.form.candidatesList.model().fileName(filename_index)
         self.capture.open_file(fullname)
         self.selected_file_id = self.get_uid_from_filename(filename)
+        self.refresh_annotations_list()
 
     def set_image_browser_directory(self):
         dir = QFileDialog.getExistingDirectory(caption="Images directory", directory=".")
@@ -412,14 +417,11 @@ class App(QApplication):
         self.capture.open_camera(ind)
 
     def refresh_video(self):
-        if self.form.pauseButton.isChecked():
-            return
-
         img = self.capture.current_np
         qimg = QImage(img.data, img.shape[1], img.shape[0], img.shape[1]*3, QImage.Format_RGB888)
         self.background_image_item.setPixmap(QPixmap(qimg))
 
-    def refresh_yolo(self):
+    def create_annotations_from_yolo(self):
         if self.form.modelType.currentText() == "YOLO" and self.form.enableYOLO.isChecked():
             self.ml_model.eval()
             with torch.no_grad():
@@ -485,6 +487,12 @@ class App(QApplication):
             self.scene_onclick(x, y)
 
     def refresh_annotations_list(self):
+        if self.form.enableYOLO.isChecked():
+            self.create_annotations_from_yolo()
+        else:
+            self.create_annotations_from_db()
+
+    def create_annotations_from_db(self):
         annotations = self.request("SELECT id, type, x,y, x2,y2, class_id FROM annotations WHERE file_id=? ORDER BY id", [self.selected_file_id])
         for r in self.poi_lines:
             self.scene.removeItem(r)

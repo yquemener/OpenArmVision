@@ -260,12 +260,12 @@
             <item>
              <layout class="QHBoxLayout" name="horizontalLayout_6">
               <item>
-               <widget class="QPushButton" name="pauseButton">
+               <widget class="QPushButton" name="stopButton">
                 <property name="text">
-                 <string>Pause</string>
+                 <string>Stop</string>
                 </property>
                 <property name="checkable">
-                 <bool>true</bool>
+                 <bool>false</bool>
                 </property>
                </widget>
               </item>
