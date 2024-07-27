@@ -422,42 +422,41 @@ class App(QApplication):
         self.background_image_item.setPixmap(QPixmap(qimg))
 
     def create_annotations_from_yolo(self):
-        if self.form.modelType.currentText() == "YOLO" and self.form.enableYOLO.isChecked():
-            self.ml_model.eval()
-            with torch.no_grad():
-                results = self.ml_model(self.capture.current_np).xyxy[0]
-                print(time.time())
-            results = results.detach().tolist()
+        self.ml_model.eval()
+        with torch.no_grad():
+            results = self.ml_model(self.capture.current_np).xyxy[0]
+            print(time.time())
+        results = results.detach().tolist()
 
-            self.current_yolo_results.clear()
-            for r in self.poi_lines:
-                self.scene.removeItem(r)
-            self.poi_lines.clear()
-            for arr in results:
-                print(arr)
-                self.current_yolo_results.append(f"{int(arr[0])} {int(arr[1])} {int(arr[2])} {int(arr[3])} {arr[4]:.3f} {arr[5]}")
-                color = QColor(255, 0, 0)
-                if arr[5]==0.0:
-                    color = QColor(0,255,0)
-                self.poi_lines.append(self.scene.addRect(arr[0], arr[1], arr[2]-arr[0], arr[3]-arr[1],
-                                                         color))
-                self.form.listROI.clear()
-            self.form.listROI.addItems(self.current_yolo_results)
-            # self.form.listROI.model().dataChanged.emit(QModelIndex(), QModelIndex())
+        self.current_yolo_results.clear()
+        for r in self.poi_lines:
+            self.scene.removeItem(r)
+        self.poi_lines.clear()
+        for arr in results:
+            print(arr)
+            self.current_yolo_results.append(f"{int(arr[0])} {int(arr[1])} {int(arr[2])} {int(arr[3])} {arr[4]:.3f} {arr[5]}")
+            color = QColor(255, 0, 0)
+            if arr[5]==0.0:
+                color = QColor(0,255,0)
+            self.poi_lines.append(self.scene.addRect(arr[0], arr[1], arr[2]-arr[0], arr[3]-arr[1],
+                                                     color))
+            self.form.listROI.clear()
+        self.form.listROI.addItems(self.current_yolo_results)
 
     def change_yolo_threshold(self):
         value = self.form.yoloThresholdSlider.value() / 1000.0
         self.form.yoloThresholdLabel.setText(f"{value:.3f}")
         if self.ml_model is not None:
             self.ml_model.conf = value
-            self.refresh_yolo()
+            self.refresh_annotations_list()
 
     def enable_yolo(self):
-        if self.form.enableYOLO.isChecked() and self.ml_model is None:
-            self.ml_model = torch.hub.load('thirdparty/yolov5/', 'custom',
-                                           path='thirdparty/yolov5/runs/train/exp167/weights/best.pt',
-                                           source='local')
-            self.refresh_yolo()
+        if self.form.enableYOLO.isChecked():
+            if self.ml_model is None:
+                self.ml_model = torch.hub.load('thirdparty/yolov5/', 'custom',
+                                               path='thirdparty/yolov5/runs/train/exp167/weights/best.pt',
+                                               source='local')
+        self.refresh_annotations_list()
 
     def select_inference_model(self):
         model_path = self.form.weightsList.currentItem().text()
