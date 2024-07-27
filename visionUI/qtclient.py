@@ -4,7 +4,7 @@ import torch
 import PyQt5
 from PyQt5 import uic
 from PyQt5.QtCore import QTimer, QRect, QRectF, QStringListModel, QAbstractListModel, QDir, QItemSelectionModel, Qt, \
-    QModelIndex
+    QModelIndex, QObject, pyqtSignal, QThread
 from PyQt5.QtGui import QImage, QPixmap, QColor, QKeySequence
 from PyQt5.QtSql import QSqlQueryModel, QSqlTableModel, QSqlDatabase, QSqlDriver
 from PyQt5.QtWidgets import QApplication, QGraphicsScene, QGraphicsView, QFileDialog, QFileSystemModel, QListWidgetItem, \
@@ -18,14 +18,8 @@ import sqlite3
 import os
 from pathlib import Path
 
-from torchvision.transforms import transforms
-from torchvision.transforms.functional import to_pil_image
-
-import thirdparty.yolov5 as yolov5
 import thirdparty.yolov5.train as yolov5_train
 
-import multi_obj
-import torchvision
 
 # Hack to make PyQt and cv2 load simultaneously
 os.environ["QT_QPA_PLATFORM_PLUGIN_PATH"] = os.fspath(
@@ -48,49 +42,64 @@ os.environ["QT_QPA_PLATFORM_PLUGIN_PATH"] = os.fspath(
 # TODO: Erase labels files when regenerating the dataset
 
 
+class VideoCaptureThread(QThread):
+    new_frame = pyqtSignal(int)
+    def __init__(self, index):
+        super().__init__()
+        self.source_type = Capture.SOURCE_TYPE_CAMERA
+        self.video_capture = cv2.VideoCapture(index)
+        self.running = True
+        self.current_np = None
+        self.frame_num = 0
 
-class Capture:
+    def run(self):
+        while self.running:
+            _, cv2_im = self.video_capture.read()
+            self.current_np = cv2.cvtColor(cv2_im, cv2.COLOR_BGR2RGB)
+            self.frame_num += 1
+            self.new_frame.emit(self.frame_num)
+        self.video_capture.release()
+
+
+class Capture(QObject):
+    new_frame = pyqtSignal(int)
     SOURCE_TYPE_NONE = 0
     SOURCE_TYPE_CAMERA = 1
     SOURCE_TYPE_FILE = 2
 
     def __init__(self):
+        super().__init__()
         self.source_type = Capture.SOURCE_TYPE_NONE
         self.video_capture = None
         self.file_path = None
-        self.last_capture = None
+        self.last_capture_time = None
         self.needs_refresh = False
         self.current_np = None
-        self.frame_num = 0
+        self.video_thread = None
+
     def open_camera(self, index):
-        if self.source_type == Capture.SOURCE_TYPE_CAMERA or self.video_capture is not None:
-            self.video_capture.release()
+        if self.source_type == Capture.SOURCE_TYPE_CAMERA or self.video_thread is not None:
+            self.video_thread.running = False
         self.source_type = Capture.SOURCE_TYPE_CAMERA
-        self.video_capture = cv2.VideoCapture(index)
-        self.needs_refresh = True
+        self.video_thread = VideoCaptureThread(index)
+        self.video_thread.start()
+        self.video_thread.new_frame.connect(self.on_new_frame)
 
     def open_file(self, path):
         self.source_type = Capture.SOURCE_TYPE_FILE
         self.file_path = path
-        self.needs_refresh = True
+        if self.file_path is not None:
+            self.current_np = np.array(Image.open(self.file_path))
+            self.new_frame.emit(0)
 
-    def refresh(self):
-        if self.source_type == Capture.SOURCE_TYPE_CAMERA:
-            ctime = time.time()
-            if self.last_capture is None or ctime - self.last_capture> 0.016:
-                self.needs_refresh=True
-
-        if self.needs_refresh:
-            if self.source_type == Capture.SOURCE_TYPE_CAMERA:
-                if self.video_capture is not None:
-                    _, cv2_im = self.video_capture.read()
-                    self.current_np = cv2.cvtColor(cv2_im, cv2.COLOR_BGR2RGB)
-            if self.source_type == Capture.SOURCE_TYPE_FILE:
-                if self.file_path is not None:
-                    self.current_np = np.array(Image.open(self.file_path))
-            self.frame_num+=1
-            self.last_capture = time.time()
-            self.needs_refresh = False
+    def on_new_frame(self, frame_num):
+        if frame_num != self.video_thread.frame_num:
+            # Our thread was delayed of more than one fra,e
+            print(f"Skipping belated frame {frame_num}")
+            return
+        self.current_np = self.video_thread.current_np
+        self.last_capture_time = time.time()
+        self.new_frame.emit(frame_num)
 
 
 class App(QApplication):
@@ -153,8 +162,8 @@ class App(QApplication):
 
         self.form.listROI.clicked.connect(self.select_annotation_from_list)
 
-        self.refresh_timer = QTimer(self)
-        self.refresh_timer.timeout.connect(self.refresh_video)
+        self.capture.new_frame.connect(self.refresh_video)
+        self.capture.new_frame.connect(self.refresh_yolo)
 
         self.autosave_timer = QTimer(self)
         self.autosave_timer.timeout.connect(self.create_candidate)
@@ -181,8 +190,6 @@ class App(QApplication):
         self.form.selectTrainingWeightsButton.clicked.connect(self.select_training_model)
         self.form.refreshModelsButton.clicked.connect(self.refresh_models_list)
         self.form.autosaveButton.clicked.connect(self.autosave)
-
-        self.video_changed = False
 
         shortcut = QShortcut(self.window)
         shortcut.setKey(QKeySequence("Del"))
@@ -262,7 +269,6 @@ class App(QApplication):
         if len(kfs)==0:
             return
         os.rename(f"{App.CANDIDATES_DIR}/{kfs[0]}", f"{App.KEYFRAMES_DIR}/{kfs[0]}")
-        self.video_changed = True
 
     def invalidate_keyframe(self):
         if not self.selected_file_id:
@@ -271,7 +277,6 @@ class App(QApplication):
         if len(kfs)==0:
             return
         os.rename(f"{App.KEYFRAMES_DIR}/{kfs[0]}", f"{App.CANDIDATES_DIR}/{kfs[0]}")
-        self.video_changed = True
 
     def erase_frame(self):
         if self.selected_file_id:
@@ -279,8 +284,6 @@ class App(QApplication):
             dl = [s for s in os.listdir(App.CANDIDATES_DIR) if s.startswith(self.selected_file_id)]
             if len(dl)>0:
                 os.remove(f"{App.CANDIDATES_DIR}/{dl[0]}")
-            self.video_changed = True
-
             self.refresh_annotations_list()
 
     def refresh_classes_lists(self):
@@ -351,8 +354,6 @@ class App(QApplication):
             namepart = ".".join(self.current_image_browser_file.split(".")[:-1])
             filename = f"{uid}_was_{namepart}.jpg"
 
-        self.video_changed = True
-
         if self.form.enableYOLO.isChecked():
             w = self.background_image_item.boundingRect().width()
             h = self.background_image_item.boundingRect().height()
@@ -375,33 +376,21 @@ class App(QApplication):
         self.current_image_browser_file=index.data()
         fullname = self.current_image_browser_dir + "/" + self.current_image_browser_file
         self.capture.open_file(fullname)
-        self.video_changed = True
-        self.refresh_video()
 
     def keyframe_image_select(self):
         filename_index = self.form.keyframesList.currentIndex()
         fullname = self.form.keyframesList.model().filePath(filename_index)
         filename = self.form.keyframesList.model().fileName(filename_index)
         self.capture.open_file(fullname)
-        self.video_changed = True
-        self.refresh_video()
         self.selected_file_id = self.get_uid_from_filename(filename)
         self.refresh_annotations_list()
 
     def candidate_image_select(self):
-        print("asd")
         filename_index = self.form.candidatesList.currentIndex()
         fullname = self.form.candidatesList.model().filePath(filename_index)
         filename = self.form.candidatesList.model().fileName(filename_index)
         self.capture.open_file(fullname)
-        self.video_changed = True
-        print(filename, self.video_changed, self.form.enableYOLO.isChecked())
-        self.refresh_video()
-        print(filename, self.video_changed)
         self.selected_file_id = self.get_uid_from_filename(filename)
-        if not self.form.enableYOLO.isChecked():
-            self.refresh_annotations_list()
-        print("asd")
 
     def set_image_browser_directory(self):
         dir = QFileDialog.getExistingDirectory(caption="Images directory", directory=".")
@@ -413,7 +402,6 @@ class App(QApplication):
         self.form.BrowseImageList.setModel(browse_image_model)
         self.form.BrowseImageList.setRootIndex(browse_image_model.index(dir))
         self.form.BrowseImageList.selectionModel().currentChanged.connect(self.image_browser_select)
-        self.video_changed = True
 
     def start_video(self):
         ind = self.form.videoIndex.text()
@@ -422,52 +410,22 @@ class App(QApplication):
         except:
             ind = -1
         self.capture.open_camera(ind)
-        self.refresh_timer.start(16)
 
     def refresh_video(self):
-        self.refresh_timer.stop()
-        if not self.form.pauseButton.isChecked():
-            self.capture.refresh()
-            img = self.capture.current_np
-            qimg = QImage(img.data, img.shape[1], img.shape[0], img.shape[1]*3, QImage.Format_RGB888)
-            self.background_image_item.setPixmap(QPixmap(qimg))
+        if self.form.pauseButton.isChecked():
+            return
 
-        if self.form.enableYOLO.isChecked() and self.last_processed_frame!=self.capture.frame_num:
-            print("Yup")
-            self.last_processed_frame = self.capture.frame_num
-            self.video_changed = False
-            if self.form.modelType.currentText() == "YOLO":
-                self.ml_model.eval()
-                with torch.no_grad():
-                    results = self.ml_model(self.capture.current_np).xyxy[0]
-                    print(time.time())
-                results = results.detach().tolist()
+        img = self.capture.current_np
+        qimg = QImage(img.data, img.shape[1], img.shape[0], img.shape[1]*3, QImage.Format_RGB888)
+        self.background_image_item.setPixmap(QPixmap(qimg))
 
-            elif self.form.modelType.currentText() == "multi_obj":
-                imgt = transforms.Resize((512, 512))(to_pil_image(self.capture.current_np))
-                imgt = torch.Tensor(np.array(imgt)).unsqueeze(0).view(1,3,512,512).cuda()
-                self.ml_model.eval()
-                with torch.no_grad():
-                    res = self.ml_model(imgt)
-                thresh = self.form.yoloThresholdSlider.value()/1000.
-                results = list()
-                for i in range(res.shape[1]):
-                    for j in range(res.shape[2]):
-                        arr = res[0, i, j].detach().tolist()
-                        if arr[0] < thresh:
-                            continue
-                        arr = arr[1:]
-                        arr[0] = (arr[0] + j + 0.5) * 640 / res.shape[1]
-                        arr[1] = (arr[1] + i + 0.5) * 480 / res.shape[2]
-                        arr[2] = arr[0] + arr[2] * 640
-                        arr[3] = arr[1] + arr[3] * 480
-                        results.append(arr)
-
-
-                # results = results[:, :, :, 1:][results[:,:,:,0]>0].view(-1,5)
-                # results = results.detach().cpu().numpy()
-                # results[:, 0:2] *= np.array((640,480))
-
+    def refresh_yolo(self):
+        if self.form.modelType.currentText() == "YOLO" and self.form.enableYOLO.isChecked():
+            self.ml_model.eval()
+            with torch.no_grad():
+                results = self.ml_model(self.capture.current_np).xyxy[0]
+                print(time.time())
+            results = results.detach().tolist()
 
             self.current_yolo_results.clear()
             for r in self.poi_lines:
@@ -475,33 +433,7 @@ class App(QApplication):
             self.poi_lines.clear()
             for arr in results:
                 print(arr)
-                # arr[2] = arr[0]+arr[2]*640
-                # arr[3] = arr[1]+arr[3]*480
-
-
-            # for i in range(results.shape[1]):
-            #     for j in range(results.shape[2]):
-            #         arr = results[0, i, j].detach().tolist()
-            #         if arr[0] < thresh:
-            #             continue
-            #         arr = arr[1:]
-            #         print(arr)
-            #         arr[0] = (arr[0] + j + 0.5) * 640 / results.shape[1]
-            #         arr[1] = (arr[1] + i + 0.5) * 480 / results.shape[2]
-            #         arr[2] = arr[0] + arr[2] * 640
-            #         arr[3] = arr[1] + arr[3] * 480
-            #         print(arr)
-            #         print()
                 self.current_yolo_results.append(f"{int(arr[0])} {int(arr[1])} {int(arr[2])} {int(arr[3])} {arr[4]:.3f} {arr[5]}")
-                # self.poi_lines.append(self.scene.addLine(r[0]-10, r[1], r[0]+10, r[1],
-                #                                          QColor(255,0,0)))
-                # self.poi_lines.append(self.scene.addLine(r[0], r[1]-10, r[0], r[1]+10,
-                #                                          QColor(255, 0, 0)))
-
-                # self.poi_lines.append(self.scene.addLine(arr[0], arr[1], arr[2], arr[3],
-                #                                          QColor(255, 0, 0)))
-                # self.poi_lines.append(self.scene.addEllipse(arr[0]-5, arr[1]-5, 10,10,
-                #                                             QColor(255, 0, 0)))
                 color = QColor(255, 0, 0)
                 if arr[5]==0.0:
                     color = QColor(0,255,0)
@@ -509,30 +441,21 @@ class App(QApplication):
                                                          color))
                 self.form.listROI.clear()
             self.form.listROI.addItems(self.current_yolo_results)
-            print("added")
             # self.form.listROI.model().dataChanged.emit(QModelIndex(), QModelIndex())
-        if not self.form.pauseButton.isChecked():
-            self.refresh_timer.start(16)
 
     def change_yolo_threshold(self):
         value = self.form.yoloThresholdSlider.value() / 1000.0
         self.form.yoloThresholdLabel.setText(f"{value:.3f}")
         if self.ml_model is not None:
             self.ml_model.conf = value
-        self.video_changed = True
-        self.refresh_video()
+            self.refresh_yolo()
 
     def enable_yolo(self):
-        self.video_changed = True
         if self.form.enableYOLO.isChecked() and self.ml_model is None:
             self.ml_model = torch.hub.load('thirdparty/yolov5/', 'custom',
-                                           path='thirdparty/runs/train/exp167/weights/best.pt',
+                                           path='thirdparty/yolov5/runs/train/exp167/weights/best.pt',
                                            source='local')
-            # num_classes = 1
-            # grid_size = 16
-            # grid_size = 16
-            # model = multi_obj.CustomYOLO(num_classes, grid_size=grid_size)
-            # self.ml_model = torch.load("/home/yves/Projects/active/HLA/OpenArmVision/visionUI/model_colab_best.bin")
+            self.refresh_yolo()
 
     def select_inference_model(self):
         model_path = self.form.weightsList.currentItem().text()
