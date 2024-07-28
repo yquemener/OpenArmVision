@@ -105,6 +105,48 @@ class Capture(QObject):
         self.video_thread.running = False
 
 
+class Annotation:
+    type_int = {"POINT": 1, "VECTOR": 2, "BOX": 3}
+    type_str = {1: "POINT", 2: "VECTOR", 3: "BOX"}
+
+    def __init__(self, _type, file, x, y, x2, y2, class_id):
+        if type(_type) is int:
+            self.type = _type
+        else:
+            self.type = Annotation.type_int[_type]
+        self.file_id = file
+        self.x = x
+        self.y =y
+        self.x2 = x2
+        self.y2 = y2
+        self.class_id = class_id
+
+    def sql_command(self):
+        return ("INSERT INTO annotations (type, file_id, x, y, x2,y2, class_id) VALUES(?, ?,?,?,?)",
+                [self.type, self.file_id, self.x, self.y, self.x2, self.y2, self.class_id])
+
+    def str(self):
+        return f"{Annotation.type_str[self.type]} {self.x} {self.y} {self.x2} {self.y2} {self.class_id}"
+
+    @staticmethod
+    def parse(s, file_id):
+        args = s.split(" ")
+        if len(args)<5:
+            return None
+        if args[0] == "POINT":
+            if len(args) != 5:
+                return
+            return Annotation(1, file_id, float(args[1]), float(args[2]), None, None, int(args[4]))
+        elif args[0] == "BOX":
+            if len(args) != 7:
+                return
+            return Annotation(3, file_id, float(args[1]), float(args[2]), (args[3]), (args[4]), int(args[6]))
+        elif args[0] == "VECTOR":
+            if len(args) != 7:
+                return
+            return Annotation(2, file_id, float(args[1]), float(args[2]), (args[3]), (args[4]), int(args[6]))
+
+
 class App(QApplication):
     DATASET_DIRECTORY="vhelio_holes"
 
@@ -171,6 +213,8 @@ class App(QApplication):
         self.autosave_timer = QTimer(self)
         self.autosave_timer.timeout.connect(self.create_candidate)
 
+        self.form.copyButton.clicked.connect(self.copy_annotations)
+        self.form.pasteButton.clicked.connect(self.paste_annotations)
         self.form.stopButton.clicked.connect(self.capture.stop_video)
         self.form.changeClassButton.clicked.connect(self.change_selection_class)
         self.form.yoloThresholdSlider.valueChanged.connect(self.change_yolo_threshold)
@@ -540,6 +584,13 @@ class App(QApplication):
         self.form.listROI.clear()
         self.form.listROI.addItems(str_list)
         self.form.listROI.setCurrentRow(selected_index)
+
+    def copy_annotations(self):
+        self.form.enableYOLO.setChecked(False)
+        self.annotations_clipboard = [self.form.listROI.item(x).text() for x in range(self.form.listROI.count())]
+
+    def paste_annotations(self):
+        print(self.annotations_clipboard)
 
     def zoomedView_onclick(self, event):
         p = self.form.zoomedView.mapToScene(event.pos())
