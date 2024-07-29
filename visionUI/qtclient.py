@@ -33,12 +33,17 @@ os.environ["QT_QPA_PLATFORM_PLUGIN_PATH"] = os.fspath(
 # exp122: XY moyen, wh moyen, Vector2dLoss
 # exp129: XY moyen+, wh moyen, latest, Vector2dLoss
 
-# TODO: Connect the "refresh model" button!
+# DONE: Connect the "refresh model" button!
 # TODO: put the runs in the dataset path
 # TODO: paths for yolov5 in a variable
 # TODO: put training in a thread
 # TODO: Add manual focus widget + 50/60 Hz compensation
 # TODO: Erase labels files when regenerating the dataset
+# TODO: drag for move and box drawing
+# TODO: resize action
+# TODO: float box positions
+# TODO: multiple projects
+# TODO: associate shape type to class
 
 
 class VideoCaptureThread(QThread):
