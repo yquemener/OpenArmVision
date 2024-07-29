@@ -6,7 +6,6 @@ from PyQt5 import uic
 from PyQt5.QtCore import QTimer, QRect, QRectF, QStringListModel, QAbstractListModel, QDir, QItemSelectionModel, Qt, \
     QModelIndex, QObject, pyqtSignal, QThread
 from PyQt5.QtGui import QImage, QPixmap, QColor, QKeySequence
-from PyQt5.QtSql import QSqlQueryModel, QSqlTableModel, QSqlDatabase, QSqlDriver
 from PyQt5.QtWidgets import QApplication, QGraphicsScene, QGraphicsView, QFileDialog, QFileSystemModel, QListWidgetItem, \
     QErrorMessage, QMessageBox, QShortcut
 import cv2
@@ -109,42 +108,53 @@ class Annotation:
     type_int = {"POINT": 1, "VECTOR": 2, "BOX": 3}
     type_str = {1: "POINT", 2: "VECTOR", 3: "BOX"}
 
-    def __init__(self, _type, file, x, y, x2, y2, class_id):
+    def __init__(self, _type, x, y, x2, y2, class_id, file=None):
         if type(_type) is int:
             self.type = _type
         else:
             self.type = Annotation.type_int[_type]
         self.file_id = file
         self.x = x
-        self.y =y
+        self.y = y
         self.x2 = x2
         self.y2 = y2
         self.class_id = class_id
 
-    def sql_command(self):
-        return ("INSERT INTO annotations (type, file_id, x, y, x2,y2, class_id) VALUES(?, ?,?,?,?)",
-                [self.type, self.file_id, self.x, self.y, self.x2, self.y2, self.class_id])
+    def sql_command(self, scale=(1,1)):
+        if self.file_id is None:
+            raise ValueError("file_id must not be None")
+        x2 = self.x2
+        y2 = self.y2
+        if x2:
+            x2/=scale[0]
+        if y2:
+            y2/=scale[1]
+        return ("INSERT INTO annotations (type, file_id, x, y, x2,y2, class_id) VALUES(?,?,?,?,?,?,?)",
+                [self.type, self.file_id, self.x/scale[0], self.y/scale[1], x2, y2, self.class_id])
 
-    def str(self):
+    def __str__(self):
         return f"{Annotation.type_str[self.type]} {self.x} {self.y} {self.x2} {self.y2} {self.class_id}"
 
+    def __repr__(self):
+        return str(self)
+
     @staticmethod
-    def parse(s, file_id):
+    def parse(s):
         args = s.split(" ")
         if len(args)<5:
             return None
         if args[0] == "POINT":
             if len(args) != 5:
                 return
-            return Annotation(1, file_id, float(args[1]), float(args[2]), None, None, int(args[4]))
+            return Annotation(1, float(args[1]), float(args[2]), None, None, int(float(args[4])))
         elif args[0] == "BOX":
             if len(args) != 7:
                 return
-            return Annotation(3, file_id, float(args[1]), float(args[2]), (args[3]), (args[4]), int(args[6]))
+            return Annotation(3, float(args[1]), float(args[2]), float(args[3]), float(args[4]), int(float(args[6])))
         elif args[0] == "VECTOR":
             if len(args) != 7:
                 return
-            return Annotation(2, file_id, float(args[1]), float(args[2]), (args[3]), (args[4]), int(args[6]))
+            return Annotation(2, float(args[1]), float(args[2]), float(args[3]), float(args[4]), int(float(args[6])))
 
 
 class App(QApplication):
@@ -253,6 +263,16 @@ class App(QApplication):
         shortcut.setKey(QKeySequence("S"))
         shortcut.setContext(Qt.ApplicationShortcut)
         shortcut.activated.connect(lambda:self.form.selectPointButton.setChecked(True))
+
+        shortcut = QShortcut(self.window)
+        shortcut.setKey(QKeySequence("Ctrl+c"))
+        shortcut.setContext(Qt.ApplicationShortcut)
+        shortcut.activated.connect(self.copy_annotations)
+
+        shortcut = QShortcut(self.window)
+        shortcut.setKey(QKeySequence("Ctrl+v"))
+        shortcut.setContext(Qt.ApplicationShortcut)
+        shortcut.activated.connect(self.paste_annotations)
 
         # Quick hack for VECTOR selection/creation
         self.vector_p1 = None
@@ -466,10 +486,11 @@ class App(QApplication):
         self.background_image_item.setPixmap(QPixmap(qimg))
 
     def create_annotations_from_yolo(self):
+        if self.capture.current_np is None:
+            return
         self.ml_model.eval()
         with torch.no_grad():
             results = self.ml_model(self.capture.current_np).xyxy[0]
-            print(time.time())
         results = results.detach().tolist()
 
         self.current_yolo_results.clear()
@@ -477,11 +498,15 @@ class App(QApplication):
             self.scene.removeItem(r)
         self.poi_lines.clear()
         for arr in results:
-            print(arr)
-            self.current_yolo_results.append(f"{int(arr[0])} {int(arr[1])} {int(arr[2])} {int(arr[3])} {arr[4]:.3f} {arr[5]}")
+            x,y,x2,y2 = arr[0:4]
+            w=x2-x
+            h=y2-y
             color = QColor(255, 0, 0)
             if arr[5]==0.0:
                 color = QColor(0,255,0)
+                # w=5
+                # h=5
+            self.current_yolo_results.append(f"BOX {x+w/2:.1f} {y+h/2:.1f} {w:.1f} {h:.1f} {arr[4]:.3f} {arr[5]}")
             self.poi_lines.append(self.scene.addRect(arr[0], arr[1], arr[2]-arr[0], arr[3]-arr[1],
                                                      color))
             self.form.listROI.clear()
@@ -586,11 +611,21 @@ class App(QApplication):
         self.form.listROI.setCurrentRow(selected_index)
 
     def copy_annotations(self):
+        for x in range(self.form.listROI.count()):
+            print(self.form.listROI.item(x).text())
         self.form.enableYOLO.setChecked(False)
-        self.annotations_clipboard = [self.form.listROI.item(x).text() for x in range(self.form.listROI.count())]
+        self.annotations_clipboard = [Annotation.parse(self.form.listROI.item(x).text()) for x in range(self.form.listROI.count())]
 
     def paste_annotations(self):
         print(self.annotations_clipboard)
+        for i in range(len(self.annotations_clipboard)):
+            self.annotations_clipboard[i].file_id = self.selected_file_id
+            cmd = self.annotations_clipboard[i].sql_command((self.background_image_item.boundingRect().width(),
+                                                             self.background_image_item.boundingRect().height()))
+            print(cmd)
+            self.request(*cmd)
+        self.refresh_annotations_list()
+
 
     def zoomedView_onclick(self, event):
         p = self.form.zoomedView.mapToScene(event.pos())
