@@ -43,7 +43,7 @@ os.environ["QT_QPA_PLATFORM_PLUGIN_PATH"] = os.fspath(
 # TODO: resize action
 # TODO: float box positions
 # TODO: multiple projects
-# TODO: associate shape type to class
+# DONE: associate shape type to class
 
 
 class VideoCaptureThread(QThread):
@@ -146,20 +146,21 @@ class Annotation:
     @staticmethod
     def parse(s):
         args = s.split(" ")
+        print(args)
         if len(args)<5:
             return None
         if args[0] == "POINT":
-            if len(args) != 5:
+            if len(args) < 5:
                 return
-            return Annotation(1, float(args[1]), float(args[2]), None, None, int(float(args[4])))
+            return Annotation(1, float(args[1]), float(args[2]), None, None, int(float(args[-1])))
         elif args[0] == "BOX":
             if len(args) != 7:
                 return
-            return Annotation(3, float(args[1]), float(args[2]), float(args[3]), float(args[4]), int(float(args[6])))
+            return Annotation(3, float(args[1]), float(args[2]), float(args[3]), float(args[4]), int(float(args[-1])))
         elif args[0] == "VECTOR":
             if len(args) != 7:
                 return
-            return Annotation(2, float(args[1]), float(args[2]), float(args[3]), float(args[4]), int(float(args[6])))
+            return Annotation(2, float(args[1]), float(args[2]), float(args[3]), float(args[4]), int(float(args[-1])))
 
 
 class App(QApplication):
@@ -186,6 +187,7 @@ class App(QApplication):
 
         Form, Window = uic.loadUiType("mainwindow.ui")
         self.window = Window()
+        self.objects_classes = dict()
         self.form = Form()
         self.form.setupUi(self.window)
         self.form.splitter.setSizes([400, 200])
@@ -298,12 +300,16 @@ class App(QApplication):
     def refresh_models_list(self):
         self.form.weightsList.clear()
         self.form.weightsList.addItem("Pre-trained YOLOv5 small")
+        list_to_sort=list()
         for exp in sorted(os.listdir("thirdparty/yolov5/runs/train")):
             path = f"thirdparty/yolov5/runs/train/{exp}/weights"
             if os.path.exists(path):
                 for pt in sorted(os.listdir(path)):
                     if pt.endswith(".pt"):
-                        self.form.weightsList.addItem(f"{path}/{pt}")
+                        fullname = f"{path}/{pt}"
+                        list_to_sort.append((os.path.getmtime(fullname), fullname))
+        for _,fn in reversed(sorted(list_to_sort)):
+            self.form.weightsList.addItem(fn)
         path = f"/home/yves/Projects/active/HLA/OpenArmVision/models/"
         if os.path.exists(path):
             for pt in sorted(os.listdir(path)):
@@ -330,6 +336,7 @@ class App(QApplication):
             req = """CREATE TABLE "classes" (
                 "id"	INTEGER PRIMARY KEY AUTOINCREMENT,
                 "name"	TEXT,
+                "type"	INTEGER,
                 "description"	TEXT,
                 "encoding"	INTEGER
             )"""
@@ -362,9 +369,11 @@ class App(QApplication):
     def refresh_classes_lists(self):
         self.form.classesList.clear()
         self.form.comboROIclass.clear()
-        for cl in self.request("SELECT * FROM classes ORDER BY encoding;"):
-            self.form.classesList.addItem(f"{cl[3]}\t{cl[1]}:  {cl[2]}")
+        self.objects_classes = dict()
+        for cl in self.request("SELECT id, name, description, encoding, type FROM classes ORDER BY encoding;"):
+            self.form.classesList.addItem(f"{cl[3]}\t{cl[1]}:  {cl[2]} ({Annotation.type_str[cl[4]]})")
             self.form.comboROIclass.addItem(f"{cl[3]}:{cl[1]}")
+            self.objects_classes[cl[3]] = (cl[1], cl[2], cl[4])
 
     @staticmethod
     def parse_class_Editor_line(s):
@@ -511,9 +520,21 @@ class App(QApplication):
                 color = QColor(0,255,0)
                 # w=5
                 # h=5
-            self.current_yolo_results.append(f"BOX {x+w/2:.1f} {y+h/2:.1f} {w:.1f} {h:.1f} {arr[4]:.3f} {arr[5]}")
-            self.poi_lines.append(self.scene.addRect(arr[0], arr[1], arr[2]-arr[0], arr[3]-arr[1],
-                                                     color))
+            # print(objects_classes)
+            obj_class = self.objects_classes[int(arr[5]) + 1]
+            type_str = Annotation.type_str[obj_class[2]]
+            self.current_yolo_results.append(f"{type_str} {x+w/2:.1f} {y+h/2:.1f} {w:.1f} {h:.1f} {arr[4]:.3f} {arr[5]+1}")
+            if type_str=="BOX":
+                self.poi_lines.append(self.scene.addRect(arr[0], arr[1], arr[2]-arr[0], arr[3]-arr[1],
+                                                         color))
+            if type_str=="POINT":
+                cx=x+w/2
+                cy=y+h/2
+                self.poi_lines.append(
+                    self.scene.addLine(cx - 10, cy, cx + 10, cy, color))
+                self.poi_lines.append(
+                    self.scene.addLine(cx, cy - 10, cx, cy + 10, color))
+
             self.form.listROI.clear()
         self.form.listROI.addItems(self.current_yolo_results)
 
@@ -756,6 +777,8 @@ names: {str(list(classes.values()))}
                          batch_size=32, epochs=epochs, patience=500)
 
     def select_annotation_from_list(self):
+        if self.form.enableYOLO.isChecked():
+            return
         annotations = self.request("SELECT id FROM annotations WHERE file_id=? ORDER BY id",
                                    [self.selected_file_id])
         previous = self.scene_selection
