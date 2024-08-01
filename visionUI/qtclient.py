@@ -272,6 +272,16 @@ class App(QApplication):
         shortcut.activated.connect(lambda:self.form.selectPointButton.setChecked(True))
 
         shortcut = QShortcut(self.window)
+        shortcut.setKey(QKeySequence("B"))
+        shortcut.setContext(Qt.ApplicationShortcut)
+        shortcut.activated.connect(lambda:self.form.boxCreateButton.setChecked(True))
+
+        shortcut = QShortcut(self.window)
+        shortcut.setKey(QKeySequence("P"))
+        shortcut.setContext(Qt.ApplicationShortcut)
+        shortcut.activated.connect(lambda:self.form.pointCreateButton.setChecked(True))
+
+        shortcut = QShortcut(self.window)
         shortcut.setKey(QKeySequence("Ctrl+c"))
         shortcut.setContext(Qt.ApplicationShortcut)
         shortcut.activated.connect(self.copy_annotations)
@@ -774,7 +784,7 @@ names: {str(list(classes.values()))}
                          # evolve=0,
                          optimizer='AdamW',
                          freeze=list(range(10)),
-                         batch_size=32, epochs=epochs, patience=500)
+                         batch_size=80, epochs=epochs, patience=500)
 
     def select_annotation_from_list(self):
         if self.form.enableYOLO.isChecked():
