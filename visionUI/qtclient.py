@@ -281,6 +281,16 @@ class App(QApplication):
         shortcut.setContext(Qt.ApplicationShortcut)
         shortcut.activated.connect(lambda:self.form.pointCreateButton.setChecked(True))
 
+        def make_yolo_enabled(self):
+            self.form.enableYOLO.setChecked(not self.form.enableYOLO.isChecked())
+            self.enable_yolo()
+
+        shortcut = QShortcut(self.window)
+        shortcut.setKey(QKeySequence("E"))
+        shortcut.setContext(Qt.ApplicationShortcut)
+
+        shortcut.activated.connect(lambda: make_yolo_enabled(self))
+
         shortcut = QShortcut(self.window)
         shortcut.setKey(QKeySequence("Ctrl+c"))
         shortcut.setContext(Qt.ApplicationShortcut)
@@ -784,7 +794,7 @@ names: {str(list(classes.values()))}
                          # evolve=0,
                          optimizer='AdamW',
                          freeze=list(range(10)),
-                         batch_size=80, epochs=epochs, patience=500)
+                         batch_size=80, epochs=epochs, patience=0)
 
     def select_annotation_from_list(self):
         if self.form.enableYOLO.isChecked():
