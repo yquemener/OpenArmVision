@@ -25,6 +25,10 @@ from sqlalchemy import create_engine, Column, Integer, String, Boolean, Float, E
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import relationship, sessionmaker
 from datetime import datetime
+import os
+import shutil
+from PIL import Image as PILImage
+from sqlalchemy.exc import IntegrityError
 
 Base = declarative_base()
 
@@ -84,22 +88,31 @@ class DatabaseManager:
         Base.metadata.create_all(self.engine)
 
     def add_image(self, path, width, height, is_train=False, is_test=False):
-        """
-        Add a new image to the database.
-        
-        :param path: File path of the image
-        :param width: Width of the image in pixels
-        :param height: Height of the image in pixels
-        :param is_train: Boolean indicating if the image is in the training set
-        :param is_test: Boolean indicating if the image is in the test set
-        :return: The created Image object
-        """
         with self.SessionLocal() as session:
-            new_image = Image(path=path, width=width, height=height, is_train=is_train, is_test=is_test)
-            session.add(new_image)
-            session.commit()
-            session.refresh(new_image)
-            return new_image
+            try:
+                # Essayez d'abord d'insérer une nouvelle image
+                new_image = Image(path=path, width=width, height=height, is_train=is_train, is_test=is_test)
+                session.add(new_image)
+                session.commit()
+                session.refresh(new_image)
+                print(f"Added new image: {new_image}")  # Débogage
+                return new_image
+            except IntegrityError:
+                # Si l'image existe déjà, faites une mise à jour
+                session.rollback()
+                existing_image = session.query(Image).filter_by(path=path).first()
+                if existing_image:
+                    existing_image.width = width
+                    existing_image.height = height
+                    existing_image.is_train = is_train
+                    existing_image.is_test = is_test
+                    session.commit()
+                    session.refresh(existing_image)
+                    print(f"Updated existing image: {existing_image}")  # Débogage
+                    return existing_image
+                else:
+                    print(f"Failed to add or update image: {path}")  # Débogage
+                    return None
 
     def add_annotation(self, image_id, annotation_type, x1, y1, x2, y2, class_name):
         """
@@ -123,15 +136,77 @@ class DatabaseManager:
             session.refresh(new_annotation)
             return new_annotation
 
-    def get_image_annotations(self, image_id):
-        """
-        Retrieve all annotations for a given image.
-        
-        :param image_id: ID of the image
-        :return: List of Annotation objects
-        """
+    def get_image_annotations(self, image_path):
         with self.SessionLocal() as session:
-            return session.query(Annotation).filter(Annotation.image_id == image_id).all()
+            image = session.query(Image).filter_by(path=image_path).first()
+            if image:
+                annotations = session.query(Annotation).filter_by(image_id=image.id).all()
+                return [
+                    (ann.type, ann.x1, ann.y1, ann.x2, ann.y2)
+                    for ann in annotations
+                ]
+            return []
+
+    def get_candidate_images(self):
+        with self.SessionLocal() as session:
+            candidates = session.query(Image).filter_by(is_train=False, is_test=False).all()
+            print(f"Database query returned {len(candidates)} candidates")  # Débogage
+            return candidates
+
+    def get_keyframe_images(self):
+        with self.SessionLocal() as session:
+            return session.query(Image).filter(Image.is_train | Image.is_test).all()
+
+    def get_image_by_path(self, path):
+        with self.SessionLocal() as session:
+            return session.query(Image).filter_by(path=path).first()
+
+    def import_images(self, source_dir, destination_dir):
+        imported_count = 0
+        for filename in os.listdir(source_dir):
+            if filename.lower().endswith(('.png', '.jpg', '.jpeg')):
+                src_path = os.path.join(source_dir, filename)
+                dst_path = os.path.join(destination_dir, filename)
+                shutil.copy2(src_path, dst_path)
+                
+                # Add image to database using relative path
+                with PILImage.open(dst_path) as img:
+                    width, height = img.size
+                relative_path = os.path.relpath(dst_path, os.path.dirname(self.db_file))
+                new_image = self.add_image(relative_path, width, height)
+                print(f"Added image to database: {new_image}")  # Débogage
+                
+                imported_count += 1
+        print(f"Imported {imported_count} images")  # Débogage
+        return imported_count
+
+    def save_annotations(self, image_path, annotations):
+        with self.SessionLocal() as session:
+            image = session.query(Image).filter_by(path=image_path).first()
+            if image:
+                # Remove existing annotations
+                session.query(Annotation).filter_by(image_id=image.id).delete()
+                
+                # Add new annotations
+                for ann_type, x1, y1, x2, y2 in annotations:
+                    new_annotation = Annotation(
+                        image_id=image.id,
+                        type=ann_type,
+                        x1=x1, y1=y1, x2=x2, y2=y2,
+                        class_name="default"  # You may want to add class selection in the GUI
+                    )
+                    session.add(new_annotation)
+                
+                session.commit()
+                print(f"Saved {len(annotations)} annotations for {image_path}")  # Debug print
+
+    @staticmethod
+    def create_database(db_path):
+        engine = create_engine(f'sqlite:///{db_path}', echo=False)
+        Base.metadata.create_all(engine)
+
+    def close(self):
+        self.engine.dispose()
 
 # Usage example:
 if __name__ == "__main__":
