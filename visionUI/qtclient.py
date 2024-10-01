@@ -193,7 +193,9 @@ class App(QApplication):
         self.form.splitter.setSizes([400, 200])
         self.form.splitter_video.setSizes([400, 200])
 
+        self.form.imageView.mouseMoveEvent = self.imageView_onmove
         self.form.imageView.mousePressEvent = self.imageView_onclick
+        self.form.zoomedView.mouseMoveEvent = self.zoomedView_onmove
         self.form.zoomedView.mousePressEvent = self.zoomedView_onclick
         self.scene_selection = None
 
@@ -306,6 +308,11 @@ class App(QApplication):
         self.vector_p2 = None
         self.vector_selection_state = 0
 
+        color = QColor(128, 128, 196)
+        self.target_lines = [
+            self.scene.addLine(100, 0, 100, 1000, color),
+            self.scene.addLine(0, 100, 1000, 100, color)]
+
         self.refresh_models_list()
 
 
@@ -320,6 +327,7 @@ class App(QApplication):
     def refresh_models_list(self):
         self.form.weightsList.clear()
         self.form.weightsList.addItem("Pre-trained YOLOv5 small")
+        self.form.weightsList.addItem("Pre-trained YOLOv5 big")
         list_to_sort=list()
         for exp in sorted(os.listdir("thirdparty/yolov5/runs/train")):
             path = f"thirdparty/yolov5/runs/train/{exp}/weights"
@@ -587,6 +595,12 @@ class App(QApplication):
         if os.path.exists(model_path):
             self.training_resume_weights=model_path
 
+    def imageView_onmove(self, event):
+        x = event.pos().x()
+        y = event.pos().y()
+        self.target_lines[0].setLine(x, 0, x, 1000)
+        self.target_lines[1].setLine(0, y, 1000, y)
+
     def imageView_onclick(self, event):
         modifiers = QApplication.keyboardModifiers()
         if modifiers == Qt.ControlModifier:
@@ -678,6 +692,13 @@ class App(QApplication):
         x = int(p.x())
         y = int(p.y())
         self.scene_onclick(x, y)
+
+    def zoomedView_onmove(self, event):
+        p = self.form.zoomedView.mapToScene(event.pos())
+        x = int(p.x())
+        y = int(p.y())
+        self.target_lines[0].setLine(x, 0, x, 1000)
+        self.target_lines[1].setLine(0, y, 1000, y)
 
     def scene_onclick(self, x, y):
         x /= self.background_image_item.boundingRect().width()
@@ -789,12 +810,12 @@ names: {str(list(classes.values()))}
         if self.training_resume_weights:
             weights = self.training_resume_weights
         yolov5_train.run(data=p / "dataset.yaml",
-                         cfg="yolov5s.yaml",
+                         cfg="yolov5x.yaml",
                          weights=weights,
                          # evolve=0,
                          optimizer='AdamW',
                          freeze=list(range(10)),
-                         batch_size=80, epochs=epochs, patience=0)
+                         batch_size=30, epochs=epochs, patience=500)
 
     def select_annotation_from_list(self):
         if self.form.enableYOLO.isChecked():
