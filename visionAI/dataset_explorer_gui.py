@@ -41,7 +41,7 @@ class DatasetExplorerGUI(QWidget):
     def init_ui(self):
         """Initialize the user interface"""
         self.setWindowTitle('Dataset Explorer')
-        self.setGeometry(100, 100, 1000, 600)
+        self.setGeometry(100, 100, 1200, 800)  # Increased window size
 
         main_layout = QVBoxLayout()
 
@@ -60,7 +60,7 @@ class DatasetExplorerGUI(QWidget):
         # Annotation widget
         self.annotation_widget = AnnotationWidget()
         self.annotation_widget.annotation_changed.connect(self.save_annotations)
-        content_layout.addWidget(self.annotation_widget, 2)
+        content_layout.addWidget(self.annotation_widget, 1)  # Use stretch factor to give it more space
 
         main_layout.addLayout(content_layout)
 

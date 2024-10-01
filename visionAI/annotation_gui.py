@@ -2,7 +2,7 @@
 This file implements a self-contained widget for image annotation using PyQt5.
 
 Features:
-1. Display an image as background
+1. Display an image as background using QGraphicsView and QGraphicsScene
 2. Allow drawing and editing of points (as crosses), lines, and rectangles on the image
 3. Switch between different annotation modes
 4. Temporary shapes in red, finalized shapes in blue
@@ -10,48 +10,105 @@ Features:
 6. Temporary point is a larger cross, finalized point is a smaller cross
 7. All shapes (including points) have a temporary state while dragging
 8. Integrated controls for mode selection and clearing annotations
+9. Annotations remain correctly positioned when resizing the widget
 
 Constraints and Considerations:
 1. Uses PyQt5 for the GUI
-2. Implements custom painting for annotations
+2. Implements custom painting for annotations using QGraphicsItems
 3. Supports multiple annotation types (point, line, rectangle)
 4. Provides a clear and intuitive user interface
 5. Allows for easy extension with additional features in the future
+6. Uses QGraphicsView and QGraphicsScene for improved rendering and scaling
 """
 
-from PyQt5.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel
-from PyQt5.QtGui import QPixmap, QPainter, QPen, QColor
-from PyQt5.QtCore import Qt, QPoint, QRect, pyqtSignal
+from PyQt5.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QButtonGroup,
+                             QGraphicsView, QGraphicsScene, QGraphicsItem, QGraphicsPixmapItem)
+from PyQt5.QtGui import QPixmap, QPen, QColor, QPainter
+from PyQt5.QtCore import Qt, QPointF, QRectF, pyqtSignal
+
+class AnnotationItem(QGraphicsItem):
+    def __init__(self, item_type, data, color=Qt.blue):
+        super().__init__()
+        self.item_type = item_type
+        self.data = data
+        self.color = color
+        self.setFlag(QGraphicsItem.ItemIsMovable)
+
+    def boundingRect(self):
+        if self.item_type == "point":
+            size = 100 if self.color == Qt.red else 18
+            return QRectF(-size/2, -size/2, size, size)
+        elif self.item_type == "line":
+            return QRectF(self.data[0], self.data[1]).normalized()
+        elif self.item_type == "rectangle":
+            return QRectF(self.data[0], self.data[1]).normalized()
+
+    def paint(self, painter, option, widget):
+        painter.setPen(QPen(self.color, 1))
+        if self.item_type == "point":
+            size = 100 if self.color == Qt.red else 18
+            painter.drawLine(int(-size/2), 0, int(size/2), 0)
+            painter.drawLine(0, int(-size/2), 0, int(size/2))
+        elif self.item_type == "line":
+            painter.drawLine(self.data[0], self.data[1])
+        elif self.item_type == "rectangle":
+            painter.drawRect(QRectF(self.data[0], self.data[1]).normalized())
+
+class CustomGraphicsView(QGraphicsView):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.parent_widget = parent
+
+    def mousePressEvent(self, event):
+        self.parent_widget.mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        self.parent_widget.mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        self.parent_widget.mouseReleaseEvent(event)
 
 class AnnotationWidget(QWidget):
-    annotation_changed = pyqtSignal(list)  # Signal pour indiquer un changement d'annotation
+    annotation_changed = pyqtSignal(list)
 
     def __init__(self):
         super().__init__()
-        self.image = QPixmap()
-        self.points = []
-        self.current_shape = None
-        self.lines = []
-        self.rectangles = []
-        self.mode = "point"  # Default mode
+        self.scene = QGraphicsScene()
+        self.view = CustomGraphicsView(self)
+        self.view.setScene(self.scene)
+        self.view.setRenderHint(QPainter.Antialiasing)
+        self.view.setViewportUpdateMode(QGraphicsView.FullViewportUpdate)
+        self.image_item = None
+        self.current_item = None
+        self.mode = "point"
         self.drawing = False
-        self.current_image = None
 
         self.init_ui()
 
     def init_ui(self):
-        layout = QVBoxLayout()
-        self.setLayout(layout)
+        main_layout = QHBoxLayout()
+        self.setLayout(main_layout)
+
+        main_layout.addWidget(self.view, 1)
 
         # Controls
-        button_layout = QHBoxLayout()
-        layout.addLayout(button_layout)
+        button_layout = QVBoxLayout()
+        main_layout.addLayout(button_layout)
+
+        self.button_group = QButtonGroup()
+        self.button_group.setExclusive(True)
 
         point_button = QPushButton("Point")
         line_button = QPushButton("Line")
         rectangle_button = QPushButton("Rectangle")
         clear_button = QPushButton("Clear")
 
+        for button in [point_button, line_button, rectangle_button]:
+            button.setCheckable(True)
+            self.button_group.addButton(button)
+
+        point_button.setChecked(True)  # Default mode
+        
         point_button.clicked.connect(lambda: self.set_mode("point"))
         line_button.clicked.connect(lambda: self.set_mode("line"))
         rectangle_button.clicked.connect(lambda: self.set_mode("rectangle"))
@@ -61,124 +118,98 @@ class AnnotationWidget(QWidget):
         button_layout.addWidget(line_button)
         button_layout.addWidget(rectangle_button)
         button_layout.addWidget(clear_button)
+        button_layout.addStretch()
 
-        # Status bar
-        self.status_label = QLabel()
-        layout.addWidget(self.status_label)
-        self.update_status()
-
-        # Set minimum size for the widget
-        self.setMinimumSize(400, 300)
-
-    def paintEvent(self, event):
-        super().paintEvent(event)  # Call the parent's paintEvent
-        painter = QPainter(self)
-        if self.image and not self.image.isNull():
-            painter.drawPixmap(self.rect(), self.image)
-
-        # Draw finalized shapes
-        painter.setPen(QPen(QColor(0, 0, 255), 1))  # Blue, 1px thickness
-
-        # Draw points (as smaller crosses)
-        for point in self.points:
-            painter.drawLine(point.x() - 3, point.y(), point.x() + 3, point.y())
-            painter.drawLine(point.x(), point.y() - 3, point.x(), point.y() + 3)
-
-        # Draw lines
-        for line in self.lines:
-            painter.drawLine(line[0], line[1])
-
-        # Draw rectangles
-        for rect in self.rectangles:
-            painter.drawRect(QRect(rect[0], rect[1]))
-
-        # Draw temporary shape
-        if self.current_shape:
-            painter.setPen(QPen(QColor(255, 0, 0), 1))  # Red, 1px thickness
-            if self.mode == "point":
-                # Draw larger cross for temporary point
-                x, y = self.current_shape.x(), self.current_shape.y()
-                painter.drawLine(x - 25, y, x + 25, y)
-                painter.drawLine(x, y - 25, x, y + 25)
-            elif self.mode == "line":
-                painter.drawLine(self.current_shape[0], self.current_shape[1])
-            elif self.mode == "rectangle":
-                painter.drawRect(QRect(self.current_shape[0], self.current_shape[1]))
+        self.setMinimumSize(600, 400)
 
     def mousePressEvent(self, event):
-        if event.button() == Qt.LeftButton:
-            self.drawing = True
-            if self.mode == "point":
-                self.current_shape = event.pos()
-            elif self.mode in ["line", "rectangle"]:
-                self.current_shape = [event.pos(), event.pos()]
-        self.update()
+        if self.view.viewport().rect().contains(event.pos()):
+            scene_pos = self.view.mapToScene(event.pos())
+            if event.button() == Qt.LeftButton:
+                self.drawing = True
+                if self.mode == "point":
+                    self.current_item = AnnotationItem("point", scene_pos, Qt.red)
+                elif self.mode in ["line", "rectangle"]:
+                    self.current_item = AnnotationItem(self.mode, [scene_pos, scene_pos], Qt.red)
+                self.scene.addItem(self.current_item)
+        print("Mouse Press Event:", scene_pos)
 
     def mouseMoveEvent(self, event):
-        if self.drawing:
+        if self.drawing and self.view.viewport().rect().contains(event.pos()):
+            scene_pos = self.view.mapToScene(event.pos())
             if self.mode == "point":
-                self.current_shape = event.pos()
+                self.current_item.setPos(scene_pos)
             elif self.mode in ["line", "rectangle"]:
-                self.current_shape[1] = event.pos()
-            self.update()
+                self.current_item.data[1] = scene_pos
+            self.current_item.update()
+            self.scene.update()
+        print("Mouse Move Event:", scene_pos)
 
     def mouseReleaseEvent(self, event):
         if event.button() == Qt.LeftButton and self.drawing:
             self.drawing = False
+            scene_pos = self.view.mapToScene(event.pos())
             if self.mode == "point":
-                self.points.append(self.current_shape)
-            elif self.mode == "line":
-                self.lines.append(self.current_shape)
-            elif self.mode == "rectangle":
-                self.rectangles.append(self.current_shape)
-            self.current_shape = None
-            self.update()
-            self.annotation_changed.emit(self.get_annotations())  # Émettre le signal
+                self.current_item.setPos(scene_pos)
+            elif self.mode in ["line", "rectangle"]:
+                self.current_item.data[1] = scene_pos
+            self.current_item.color = Qt.blue
+            self.current_item.update()
+            self.scene.update()
+            self.current_item = None
+            self.annotation_changed.emit(self.get_annotations())
+        print("Mouse Release Event:", scene_pos)
 
     def set_mode(self, mode):
         self.mode = mode
-        self.update_status()
 
     def clear_annotations(self):
-        self.points = []
-        self.lines = []
-        self.rectangles = []
-        self.current_shape = None
-        self.update()
+        self.scene.clear()
+        self.current_item = None
 
     def load_image(self, image_path):
-        self.image = QPixmap(image_path)
-        self.current_image = image_path
-        self.update()  # Use self.update() instead of self.annotation_area.update()
+        pixmap = QPixmap(image_path)
+        if self.image_item:
+            self.scene.removeItem(self.image_item)
+        self.image_item = QGraphicsPixmapItem(pixmap)
+        self.scene.addItem(self.image_item)
+        self.view.setSceneRect(self.image_item.boundingRect())
+        self.fit_image_in_view()
+
+    def fit_image_in_view(self):
+        if self.image_item:
+            self.view.fitInView(self.image_item, Qt.KeepAspectRatio)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self.fit_image_in_view()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self.fit_image_in_view()
 
     def load_annotations(self, annotations):
-        self.points = []
-        self.lines = []
-        self.rectangles = []
+        for item in self.scene.items():
+            if isinstance(item, AnnotationItem):
+                self.scene.removeItem(item)
         for ann_type, x1, y1, x2, y2 in annotations:
             if ann_type == 'point':
-                self.points.append(QPoint(int(x1), int(y1)))
+                item = AnnotationItem("point", QPointF(int(x1), int(y1)))
             elif ann_type == 'line':
-                self.lines.append([QPoint(int(x1), int(y1)), QPoint(int(x2), int(y2))])
+                item = AnnotationItem("line", [QPointF(int(x1), int(y1)), QPointF(int(x2), int(y2))])
             elif ann_type == 'rectangle':
-                self.rectangles.append([QPoint(int(x1), int(y1)), QPoint(int(x2), int(y2))])
-        self.update()
+                item = AnnotationItem("rectangle", [QPointF(int(x1), int(y1)), QPointF(int(x2), int(y2))])
+            self.scene.addItem(item)
 
     def get_annotations(self):
         annotations = []
-        for point in self.points:
-            annotations.append(('point', point.x(), point.y(), None, None))
-        for line in self.lines:
-            annotations.append(('line', line[0].x(), line[0].y(), line[1].x(), line[1].y()))
-        for rect in self.rectangles:
-            annotations.append(('rectangle', rect[0].x(), rect[0].y(), rect[1].x(), rect[1].y()))
+        for item in self.scene.items():
+            if isinstance(item, AnnotationItem):
+                if item.item_type == "point":
+                    annotations.append(('point', item.pos().x(), item.pos().y(), None, None))
+                elif item.item_type in ["line", "rectangle"]:
+                    annotations.append((item.item_type, item.data[0].x(), item.data[0].y(), item.data[1].x(), item.data[1].y()))
         return annotations
-
-    def update_status(self):
-        status_text = f"Mode: {self.mode.capitalize()}"
-        self.status_label.setText(status_text)
-
-
 
 if __name__ == "__main__":
     from PyQt5.QtWidgets import QApplication, QMainWindow
@@ -191,6 +222,9 @@ if __name__ == "__main__":
 
             self.annotation_widget = AnnotationWidget()
             self.setCentralWidget(self.annotation_widget)
+            
+            # Charger l'image d'exemple
+            self.annotation_widget.load_image("test/candidates/2024-08-02_19-33-47.650549.jpg")
 
     app = QApplication(sys.argv)
     window = MainWindow()
