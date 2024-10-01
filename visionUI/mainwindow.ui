@@ -567,6 +567,19 @@
                </widget>
               </item>
               <item>
+               <widget class="QPushButton" name="lineButton">
+                <property name="text">
+                 <string>Line</string>
+                </property>
+                <property name="checkable">
+                <bool>true</bool>
+                </property>
+                <property name="autoExclusive">
+                    <bool>true</bool>
+                </property>
+               </widget>
+              </item>
+              <item>
                <widget class="QPushButton" name="movePointButton">
                 <property name="text">
                  <string>Move</string>

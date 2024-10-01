@@ -4,10 +4,10 @@ import torch
 import PyQt5
 from PyQt5 import uic
 from PyQt5.QtCore import QTimer, QRect, QRectF, QStringListModel, QAbstractListModel, QDir, QItemSelectionModel, Qt, \
-    QModelIndex, QObject, pyqtSignal, QThread
-from PyQt5.QtGui import QImage, QPixmap, QColor, QKeySequence
+    QModelIndex, QObject, pyqtSignal, QThread, QLineF
+from PyQt5.QtGui import QImage, QPixmap, QColor, QKeySequence, QPen
 from PyQt5.QtWidgets import QApplication, QGraphicsScene, QGraphicsView, QFileDialog, QFileSystemModel, QListWidgetItem, \
-    QErrorMessage, QMessageBox, QShortcut
+    QErrorMessage, QMessageBox, QShortcut, QGraphicsLineItem, QGraphicsRectItem
 import cv2
 import sys
 import numpy as np
@@ -17,6 +17,8 @@ import sqlite3
 import os
 from pathlib import Path
 
+import os
+os.environ['WANDB_DISABLED'] = 'true'
 import thirdparty.yolov5.train as yolov5_train
 
 
@@ -110,10 +112,10 @@ class Capture(QObject):
 
 
 class Annotation:
-    type_int = {"POINT": 1, "VECTOR": 2, "BOX": 3}
-    type_str = {1: "POINT", 2: "VECTOR", 3: "BOX"}
+    type_int = {"POINT": 1, "LINE": 2, "BOX": 3}
+    type_str = {1: "POINT", 2: "LINE", 3: "BOX"}
 
-    def __init__(self, _type, x, y, x2, y2, class_id, file=None):
+    def __init__(self, _type, x, y, x2=None, y2=None, class_id=None, file=None):
         if type(_type) is int:
             self.type = _type
         else:
@@ -134,8 +136,12 @@ class Annotation:
             x2/=scale[0]
         if y2:
             y2/=scale[1]
-        return ("INSERT INTO annotations (type, file_id, x, y, x2,y2, class_id) VALUES(?,?,?,?,?,?,?)",
-                [self.type, self.file_id, self.x/scale[0], self.y/scale[1], x2, y2, self.class_id])
+        if self.type == Annotation.type_int["LINE"]:
+            return ("INSERT INTO annotations (type, file_id, x, y, x2, y2, class_id) VALUES(?,?,?,?,?,?,?)",
+                    [self.type, self.file_id, self.x/scale[0], self.y/scale[1], x2, y2, self.class_id])
+        else:
+            return ("INSERT INTO annotations (type, file_id, x, y, x2,y2, class_id) VALUES(?,?,?,?,?,?,?)",
+                    [self.type, self.file_id, self.x/scale[0], self.y/scale[1], x2, y2, self.class_id])
 
     def __str__(self):
         return f"{Annotation.type_str[self.type]} {self.x} {self.y} {self.x2} {self.y2} {self.class_id}"
@@ -157,7 +163,7 @@ class Annotation:
             if len(args) != 7:
                 return
             return Annotation(3, float(args[1]), float(args[2]), float(args[3]), float(args[4]), int(float(args[-1])))
-        elif args[0] == "VECTOR":
+        elif args[0] == "LINE":
             if len(args) != 7:
                 return
             return Annotation(2, float(args[1]), float(args[2]), float(args[3]), float(args[4]), int(float(args[-1])))
@@ -195,8 +201,8 @@ class App(QApplication):
 
         self.form.imageView.mouseMoveEvent = self.imageView_onmove
         self.form.imageView.mousePressEvent = self.imageView_onclick
-        self.form.zoomedView.mouseMoveEvent = self.zoomedView_onmove
         self.form.zoomedView.mousePressEvent = self.zoomedView_onclick
+        self.form.zoomedView.mouseReleaseEvent = self.zoomedView_onrelease
         self.scene_selection = None
 
         self.scene = QGraphicsScene()
@@ -248,7 +254,7 @@ class App(QApplication):
         self.form.keyframesList.selectionModel().selectionChanged.connect(self.keyframe_image_select)
         self.form.newClassButton.clicked.connect(self.create_new_class)
         self.form.deleteClassButton.clicked.connect(self.remove_class)
-        self.form.deletePointButton.clicked.connect(self.remove_point)
+        self.form.deletePointButton.clicked.connect(self.remove_annotation)
         self.form.validateKFButton.clicked.connect(self.validate_keyframe)
         self.form.invalidateKFButton.clicked.connect(self.invalidate_keyframe)
         self.form.prepareDatasetButton.clicked.connect(self.prepare_training_files)
@@ -261,7 +267,7 @@ class App(QApplication):
         shortcut = QShortcut(self.window)
         shortcut.setKey(QKeySequence("Del"))
         shortcut.setContext(Qt.ApplicationShortcut)
-        shortcut.activated.connect(self.remove_point)
+        shortcut.activated.connect(self.remove_annotation)
 
         shortcut = QShortcut(self.window)
         shortcut.setKey(QKeySequence("M"))
@@ -307,11 +313,9 @@ class App(QApplication):
         self.vector_p1 = None
         self.vector_p2 = None
         self.vector_selection_state = 0
-
-        color = QColor(128, 128, 196)
-        self.target_lines = [
-            self.scene.addLine(100, 0, 100, 1000, color),
-            self.scene.addLine(0, 100, 1000, 100, color)]
+        self.is_drawing = False
+        self.temp_shape = None
+        self.start_point = None
 
         self.refresh_models_list()
 
@@ -596,23 +600,168 @@ class App(QApplication):
             self.training_resume_weights=model_path
 
     def imageView_onmove(self, event):
-        x = event.pos().x()
-        y = event.pos().y()
-        self.target_lines[0].setLine(x, 0, x, 1000)
-        self.target_lines[1].setLine(0, y, 1000, y)
+        self.handle_mouse_move(event, self.form.imageView)
 
     def imageView_onclick(self, event):
-        modifiers = QApplication.keyboardModifiers()
-        if modifiers == Qt.ControlModifier:
-            p = self.form.imageView.mapToScene(event.pos())
-            x = int(p.x())
-            y = int(p.y())
-            self.form.zoomedView.setSceneRect(x - 10, y-10, 20,20)
+        self.handle_mouse_press(event, self.form.imageView)
+
+    def imageView_onrelease(self, event):
+        self.handle_mouse_release(event, self.form.imageView)
+
+    def zoomedView_onmove(self, event):
+        self.handle_mouse_move(event, self.form.zoomedView)
+
+    def zoomedView_onclick(self, event):
+        self.handle_mouse_press(event, self.form.zoomedView)
+
+    def zoomedView_onrelease(self, event):
+        self.handle_mouse_release(event, self.form.zoomedView)
+
+    def handle_mouse_press(self, event, view):
+        if self.form.boxCreateButton.isChecked() or self.form.pointCreateButton.isChecked() or self.form.lineButton.isChecked():
+            self.is_drawing = True
+            self.start_point = view.mapToScene(event.pos())
+            if self.temp_shape:
+                self.scene.removeItem(self.temp_shape)
+            if self.form.boxCreateButton.isChecked():
+                self.temp_shape = self.scene.addRect(QRectF(self.start_point, self.start_point), QPen(Qt.red))
+            elif self.form.pointCreateButton.isChecked():
+                self.temp_shape = self.create_cross(self.start_point.x(), self.start_point.y(), 10, 50, Qt.red)
+            elif self.form.lineButton.isChecked():
+                self.temp_shape = self.scene.addLine(QLineF(self.start_point, self.start_point), QPen(Qt.red))
         else:
-            p = self.form.imageView.mapToScene(event.pos())
-            x = int(p.x())
-            y = int(p.y())
-            self.scene_onclick(x, y)
+            # Selection logic
+            point = view.mapToScene(event.pos())
+            self.select_closest_annotation(point.x(), point.y())
+
+    def handle_mouse_move(self, event, view):
+        if self.is_drawing and self.start_point:
+            current_point = view.mapToScene(event.pos())
+            if self.form.boxCreateButton.isChecked():
+                if not isinstance(self.temp_shape, QGraphicsRectItem):
+                    if self.temp_shape:
+                        self.scene.removeItem(self.temp_shape)
+                    self.temp_shape = self.scene.addRect(QRectF(self.start_point, self.start_point), QPen(Qt.red))
+                rect = QRectF(self.start_point, current_point).normalized()
+                self.temp_shape.setRect(rect)
+            elif self.form.pointCreateButton.isChecked():
+                if self.temp_shape:
+                    self.scene.removeItem(self.temp_shape)
+                self.temp_shape = self.create_cross(current_point.x(), current_point.y(), 10, 50, Qt.red)
+            elif self.form.lineButton.isChecked():
+                if not isinstance(self.temp_shape, QGraphicsLineItem):
+                    if self.temp_shape:
+                        self.scene.removeItem(self.temp_shape)
+                    self.temp_shape = self.scene.addLine(QLineF(self.start_point, self.start_point), QPen(Qt.red))
+                self.temp_shape.setLine(QLineF(self.start_point, current_point))
+        else:
+            # Update crosshair or any other non-drawing mouse move logic
+            pass
+
+    def handle_mouse_release(self, event, view):
+        if self.is_drawing and self.start_point:
+            end_point = view.mapToScene(event.pos())
+            if self.temp_shape:
+                self.scene.removeItem(self.temp_shape)
+            self.temp_shape = None
+            self.is_drawing = False
+            
+            obj_class = int(self.form.comboROIclass.currentText().split(":")[0])
+            w = self.background_image_item.boundingRect().width()
+            h = self.background_image_item.boundingRect().height()
+            
+            if self.form.boxCreateButton.isChecked():
+                x1, y1 = min(self.start_point.x(), end_point.x()), min(self.start_point.y(), end_point.y())
+                x2, y2 = max(self.start_point.x(), end_point.x()), max(self.start_point.y(), end_point.y())
+                self.request("INSERT INTO annotations (type, file_id, x, y, x2, y2, class_id) VALUES(3, ?,?,?,?,?,?)",
+                             [self.selected_file_id, 
+                              (x1 + x2) / (2 * w), (y1 + y2) / (2 * h), 
+                              (x2 - x1) / w, (y2 - y1) / h, 
+                              obj_class])
+            elif self.form.pointCreateButton.isChecked():
+                x, y = end_point.x() / w, end_point.y() / h
+                self.request("INSERT INTO annotations (type, file_id, x, y, class_id) VALUES(1, ?,?,?,?)",
+                             [self.selected_file_id, x, y, obj_class])
+            elif self.form.lineButton.isChecked():
+                x1, y1 = self.start_point.x() / w, self.start_point.y() / h
+                x2, y2 = end_point.x() / w, end_point.y() / h
+                self.request("INSERT INTO annotations (type, file_id, x, y, x2, y2, class_id) VALUES(2, ?,?,?,?,?,?)",
+                             [self.selected_file_id, x1, y1, x2, y2, obj_class])
+            
+            self.refresh_annotations_list()
+
+        self.start_point = None
+        self.is_drawing = False
+        self.temp_shape = None
+
+    def create_cross(self, x, y, size, temp_size, color):
+        group = self.scene.createItemGroup([
+            self.scene.addLine(x - size/2, y, x + size/2, y, QPen(color)),
+            self.scene.addLine(x, y - size/2, x, y + size/2, QPen(color))
+        ])
+        if temp_size > size:
+            group.addToGroup(self.scene.addLine(x - temp_size/2, y, x - size/2, y, QPen(color, 1, Qt.DashLine)))
+            group.addToGroup(self.scene.addLine(x + size/2, y, x + temp_size/2, y, QPen(color, 1, Qt.DashLine)))
+            group.addToGroup(self.scene.addLine(x, y - temp_size/2, x, y - size/2, QPen(color, 1, Qt.DashLine)))
+            group.addToGroup(self.scene.addLine(x, y + size/2, x, y + temp_size/2, QPen(color, 1, Qt.DashLine)))
+        return group
+
+    def select_closest_annotation(self, x, y):
+        annotations = self.request("SELECT id, type, x, y, x2, y2 FROM annotations WHERE file_id=?", [self.selected_file_id])
+        closest_dist = float('inf')
+        closest_id = None
+        w = self.background_image_item.boundingRect().width()
+        h = self.background_image_item.boundingRect().height()
+
+        for aid, ty, ax, ay, ax2, ay2 in annotations:
+            ax *= w
+            ay *= h
+            if ty == 1:  # Point
+                dist = ((x - ax)**2 + (y - ay)**2)**0.5
+            elif ty == 2:  # Line
+                ax2 *= w
+                ay2 *= h
+                dist = self.point_to_line_distance(x, y, ax, ay, ax2, ay2)
+            elif ty == 3:  # Box
+                ax2 *= w
+                ay2 *= h
+                cx, cy = ax + ax2/2, ay + ay2/2
+                dist = ((x - cx)**2 + (y - cy)**2)**0.5
+            
+            if dist < closest_dist:
+                closest_dist = dist
+                closest_id = aid
+
+        if closest_id is not None:
+            self.scene_selection = closest_id
+            self.refresh_annotations_list()
+
+    def point_to_line_distance(self, x, y, x1, y1, x2, y2):
+        # Calculate the distance from a point to a line segment
+        A = x - x1
+        B = y - y1
+        C = x2 - x1
+        D = y2 - y1
+
+        dot = A * C + B * D
+        len_sq = C * C + D * D
+        param = -1
+        if len_sq != 0:
+            param = dot / len_sq
+
+        if param < 0:
+            xx = x1
+            yy = y1
+        elif param > 1:
+            xx = x2
+            yy = y2
+        else:
+            xx = x1 + param * C
+            yy = y1 + param * D
+
+        dx = x - xx
+        dy = y - yy
+        return (dx * dx + dy * dy) ** 0.5
 
     def refresh_annotations_list(self):
         if self.form.enableYOLO.isChecked():
@@ -634,33 +783,26 @@ class App(QApplication):
             x = round(x*w)
             y = round(y*h)
             if self.scene_selection and self.scene_selection == aid:
-                color = QColor(255, 0, 0)
+                color = QColor(255, 0, 0)  # Red for selected
                 selected_index = i
             else:
-                color = QColor(0, 0, 255)
+                color = QColor(0, 0, 255)  # Blue for unselected
             if ty == 1:
                 anot_type = "POINT"
                 str_list.append(f"{anot_type} {x} {y} {1.0} {cid}")
-                self.poi_lines.append(
-                    self.scene.addLine(x - 10, y, x + 10, y, color))
-                self.poi_lines.append(
-                    self.scene.addLine(x, y - 10, x, y + 10, color))
+                self.poi_lines.append(self.create_cross(x, y, 10, 10, color))
             elif ty == 2:
-                anot_type = "VECTOR"
+                anot_type = "LINE"
                 x2 = round(x2 * w)
                 y2 = round(y2 * h)
                 str_list.append(f"{anot_type} {x} {y} {x2} {y2} {1.0} {cid}")
-                self.poi_lines.append(
-                    self.scene.addLine(x, y, x2, y2, color))
-                self.poi_lines.append(
-                    self.scene.addEllipse(x-5, y-5, 10, 10, color))
+                self.poi_lines.append(self.scene.addLine(x, y, x2, y2, color))
             elif ty == 3:
                 anot_type = "BOX"
                 x2 = round(x2 * w)
                 y2 = round(y2 * h)
                 str_list.append(f"{anot_type} {x} {y} {x2} {y2} {1.0} {cid}")
-                self.poi_lines.append(
-                    self.scene.addRect(x-x2/2, y-y2/2, x2, y2, color))
+                self.poi_lines.append(self.scene.addRect(x-x2/2, y-y2/2, x2, y2, color))
             else:
                 anot_type = "UNKOWN"
                 str_list.append(f"{anot_type} {x} {y} {x2} {y2} {1.0} {cid}")
@@ -692,13 +834,6 @@ class App(QApplication):
         x = int(p.x())
         y = int(p.y())
         self.scene_onclick(x, y)
-
-    def zoomedView_onmove(self, event):
-        p = self.form.zoomedView.mapToScene(event.pos())
-        x = int(p.x())
-        y = int(p.y())
-        self.target_lines[0].setLine(x, 0, x, 1000)
-        self.target_lines[1].setLine(0, y, 1000, y)
 
     def scene_onclick(self, x, y):
         x /= self.background_image_item.boundingRect().width()
@@ -761,8 +896,7 @@ class App(QApplication):
 
     def remove_point(self):
         if self.scene_selection:
-            self.request("DELETE FROM annotations WHERE id=?",
-                         [self.scene_selection])
+            self.request("DELETE FROM annotations WHERE id=?", [self.scene_selection])
             self.scene_selection = None
             self.refresh_annotations_list()
 
