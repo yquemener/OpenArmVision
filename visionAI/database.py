@@ -187,21 +187,27 @@ class DatabaseManager:
         with self.SessionLocal() as session:
             image = session.query(Image).filter_by(path=image_path).first()
             if image:
-                # Remove existing annotations
-                session.query(Annotation).filter_by(image_id=image.id).delete()
-                
-                # Add new annotations
-                for ann_type, x1, y1, x2, y2 in annotations:
-                    new_annotation = Annotation(
-                        image_id=image.id,
-                        type=ann_type,
-                        x1=x1, y1=y1, x2=x2, y2=y2,
-                        class_name="default"  # You may want to add class selection in the GUI
-                    )
-                    session.add(new_annotation)
-                
-                session.commit()
-                print(f"Saved {len(annotations)} annotations for {image_path}")  # Debug print
+                try:
+                    # Remove existing annotations
+                    session.query(Annotation).filter_by(image_id=image.id).delete()
+                    
+                    # Add new annotations
+                    for ann_type, x1, y1, x2, y2 in annotations:
+                        new_annotation = Annotation(
+                            image_id=image.id,
+                            type=ann_type,
+                            x1=x1, y1=y1, x2=x2, y2=y2,
+                            class_name="default"
+                        )
+                        session.add(new_annotation)
+                    
+                    session.commit()
+                    print(f"Saved {len(annotations)} annotations for {image_path}")
+                except Exception as e:
+                    session.rollback()
+                    print(f"Error saving annotations: {e}")
+            else:
+                print(f"Image not found in database: {image_path}")
 
     @staticmethod
     def create_database(db_path):

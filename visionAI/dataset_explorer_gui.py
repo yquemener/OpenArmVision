@@ -4,6 +4,8 @@ from PyQt5.QtWidgets import QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLi
 from PyQt5.QtCore import Qt, QSettings, pyqtSignal
 from annotation_gui import AnnotationWidget
 from database import DatabaseManager
+import faulthandler
+faulthandler.enable()
 
 """
 Dataset Explorer GUI
@@ -35,6 +37,7 @@ class DatasetExplorerGUI(QWidget):
         
         self.init_ui()
         self.load_last_dataset()
+        self.times_called = 0
     
     def init_ui(self):
         """Initialize the user interface"""
@@ -70,8 +73,9 @@ class DatasetExplorerGUI(QWidget):
 
         # Image list
         self.image_list = QListWidget()
-        self.image_list.itemClicked.connect(self.on_image_selected)
-        self.image_list.currentItemChanged.connect(self.on_image_selected)  # Add this line
+        self.image_list.currentItemChanged.connect(self.on_image_selected)
+        # Supprimez la ligne suivante car elle cause des appels en double :
+        # self.image_list.itemClicked.connect(self.on_image_selected)
         left_layout.addWidget(self.image_list)
 
         self.splitter.addWidget(left_widget)
@@ -159,13 +163,15 @@ class DatasetExplorerGUI(QWidget):
         """Update the UI with dataset information"""
         self.load_candidate_images()
 
-    def on_image_selected(self, item):
-        if item is None:
+    def on_image_selected(self, current, previous):
+        if current is None or current == previous:
             return
-        
-        image_path = item.text()
+
+        image_path = current.text()
         self.current_image = image_path
         full_path = os.path.join(self.dataset_path, image_path)
+        
+        print(f"Loading image: {full_path}")
         self.annotation_widget.load_image(full_path)
         
         # Load existing annotations
@@ -212,10 +218,15 @@ class DatasetExplorerGUI(QWidget):
 
     def save_annotations(self, annotations):
         if self.current_image:
-            # Convert coordinates to float before saving
-            float_annotations = [(ann_type, float(x1), float(y1), float(x2) if x2 is not None else None, float(y2) if y2 is not None else None) for ann_type, x1, y1, x2, y2 in annotations]
-            self.db_manager.save_annotations(self.current_image, float_annotations)
-            print(f"Saved {len(annotations)} annotations for {self.current_image}")  # Debug print
+            try:
+                float_annotations = [(ann_type, float(x1), float(y1), float(x2) if x2 is not None else None, float(y2) if y2 is not None else None) for ann_type, x1, y1, x2, y2 in annotations]
+                print(float_annotations)
+                self.db_manager.save_annotations(self.current_image, float_annotations)
+                print(f"Saved {len(annotations)} annotations for {self.current_image}")
+            except Exception as e:
+                print(f"Error saving annotations: {e}")
+        else:
+            print("No current image selected, cannot save annotations")
 
     def closeEvent(self, event):
         """Clean up resources when the window is closed"""

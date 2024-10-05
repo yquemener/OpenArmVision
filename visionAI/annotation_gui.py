@@ -78,6 +78,7 @@ class AnnotationWidget(QWidget):
     annotation_changed = pyqtSignal(list)
 
     def __init__(self):
+        print("Entering AnnotationWidget.__init__")
         super().__init__()
         self.scene = QGraphicsScene()
         self.view = CustomGraphicsView(self)
@@ -91,8 +92,10 @@ class AnnotationWidget(QWidget):
         self.selected_item = None
 
         self.init_ui()
+        print("Exiting AnnotationWidget.__init__")
 
     def init_ui(self):
+        print("Entering init_ui")
         main_layout = QHBoxLayout()
         self.setLayout(main_layout)
 
@@ -139,15 +142,19 @@ class AnnotationWidget(QWidget):
         select_button.setShortcut(QKeySequence("S"))
         delete_shortcut = QShortcut(QKeySequence(Qt.Key_Delete), self)
         delete_shortcut.activated.connect(self.delete_selected_item)
+        print("Exiting init_ui")
 
     def set_mode(self, mode):
+        print(f"Entering set_mode: {mode}")
         self.mode = mode
         if mode != "select" and self.selected_item:
             self.selected_item.color = Qt.blue
             self.selected_item.update()
             self.selected_item = None
+        print(f"Exiting set_mode: {mode}")
 
     def mousePressEvent(self, event):
+        print("Entering mousePressEvent")
         if self.view.viewport().rect().contains(event.pos()):
             scene_pos = self.view.mapToScene(event.pos())
             if event.button() == Qt.LeftButton:
@@ -160,8 +167,10 @@ class AnnotationWidget(QWidget):
                     elif self.mode in ["line", "rectangle"]:
                         self.current_item = AnnotationItem(self.mode, [scene_pos, scene_pos], Qt.red)
                     self.scene.addItem(self.current_item)
+        print("Exiting mousePressEvent")
 
     def mouseMoveEvent(self, event):
+        print("Entering mouseMoveEvent")
         if self.drawing and self.view.viewport().rect().contains(event.pos()):
             scene_pos = self.view.mapToScene(event.pos())
             if self.mode == "point":
@@ -170,8 +179,10 @@ class AnnotationWidget(QWidget):
                 self.current_item.data[1] = scene_pos
             self.current_item.update()
             self.scene.update()
+        print("Exiting mouseMoveEvent")
 
     def mouseReleaseEvent(self, event):
+        print("Entering mouseReleaseEvent")
         if event.button() == Qt.LeftButton and self.drawing:
             self.drawing = False
             scene_pos = self.view.mapToScene(event.pos())
@@ -184,8 +195,10 @@ class AnnotationWidget(QWidget):
             self.scene.update()
             self.current_item = None
             self.annotation_changed.emit(self.get_annotations())
+        print("Exiting mouseReleaseEvent")
 
     def select_nearest_item(self, pos):
+        print("Entering select_nearest_item")
         min_distance = float('inf')
         nearest_item = None
         for item in self.scene.items():
@@ -203,8 +216,10 @@ class AnnotationWidget(QWidget):
             self.selected_item = nearest_item
             self.selected_item.color = Qt.red
             self.selected_item.update()
+        print("Exiting select_nearest_item")
 
     def distance_to_item(self, item, pos):
+        print("Entering distance_to_item")
         if item.item_type == "point":
             return sqrt((item.pos().x() - pos.x())**2 + (item.pos().y() - pos.y())**2)
         elif item.item_type == "line":
@@ -220,8 +235,10 @@ class AnnotationWidget(QWidget):
                            self.point_to_line_distance(pos, rect.topRight(), rect.bottomRight()),
                            self.point_to_line_distance(pos, rect.bottomRight(), rect.bottomLeft()),
                            self.point_to_line_distance(pos, rect.bottomLeft(), rect.topLeft()))
+        print("Exiting distance_to_item")
 
     def point_to_line_distance(self, p, a, b):
+        print("Entering point_to_line_distance")
         # Calculate the distance from point p to line segment ab
         ax, ay = a.x(), a.y()
         bx, by = b.x(), b.y()
@@ -249,36 +266,51 @@ class AnnotationWidget(QWidget):
 
         # Return the distance to the closest point
         return sqrt((px - closest_x)**2 + (py - closest_y)**2)
+        print("Exiting point_to_line_distance")
 
     def point_to_point_distance(self, p1, p2):
+        print("Entering point_to_point_distance")
         return sqrt((p1.x() - p2.x())**2 + (p1.y() - p2.y())**2)
+        print("Exiting point_to_point_distance")
 
     def clear_annotations(self):
+        print("Entering clear_annotations")
         self.scene.clear()
         self.current_item = None
+        print("Exiting clear_annotations")
 
     def load_image(self, image_path):
+        print(f"Entering load_image: {image_path}")
         pixmap = QPixmap(image_path)
-        if self.image_item:
-            self.scene.removeItem(self.image_item)
+        self.scene.clear()  # Clear all items, including annotations
         self.image_item = QGraphicsPixmapItem(pixmap)
         self.scene.addItem(self.image_item)
         self.view.setSceneRect(self.image_item.boundingRect())
         self.fit_image_in_view()
+        self.current_item = None
+        self.selected_item = None
+        print(f"Exiting load_image: {image_path}")
 
     def fit_image_in_view(self):
+        print("Entering fit_image_in_view")
         if self.image_item:
             self.view.fitInView(self.image_item, Qt.KeepAspectRatio)
+        print("Exiting fit_image_in_view")
 
     def resizeEvent(self, event):
+        print("Entering resizeEvent")
         super().resizeEvent(event)
         self.fit_image_in_view()
+        print("Exiting resizeEvent")
 
     def showEvent(self, event):
+        print("Entering showEvent")
         super().showEvent(event)
         self.fit_image_in_view()
+        print("Exiting showEvent")
 
     def load_annotations(self, annotations):
+        print(f"Entering load_annotations: {annotations}")
         for item in self.scene.items():
             if isinstance(item, AnnotationItem):
                 self.scene.removeItem(item)
@@ -290,8 +322,10 @@ class AnnotationWidget(QWidget):
             elif ann_type == 'rectangle':
                 item = AnnotationItem("rectangle", [QPointF(x1, y1), QPointF(x2, y2)])
             self.scene.addItem(item)
+        print(f"Exiting load_annotations: {annotations}")
 
     def get_annotations(self):
+        print("Entering get_annotations")
         annotations = []
         for item in self.scene.items():
             if isinstance(item, AnnotationItem):
@@ -299,33 +333,79 @@ class AnnotationWidget(QWidget):
                     annotations.append(('point', item.pos().x(), item.pos().y(), None, None))
                 elif item.item_type in ["line", "rectangle"]:
                     annotations.append((item.item_type, item.data[0].x(), item.data[0].y(), item.data[1].x(), item.data[1].y()))
+        print(f"Exiting get_annotations: {annotations}")
         return annotations
 
     def delete_selected_item(self):
+        print("Entering delete_selected_item")
         if self.selected_item:
             self.scene.removeItem(self.selected_item)
             self.selected_item = None
             self.annotation_changed.emit(self.get_annotations())
+        print("Exiting delete_selected_item")
+
+    def cleanup(self):
+        print("Entering cleanup")
+        if self.scene:
+            self.scene.clear()
+        self.current_item = None
+        self.selected_item = None
+        self.image_item = None
+        print("Exiting cleanup")
 
 if __name__ == "__main__":
-    from PyQt5.QtWidgets import QApplication, QMainWindow
+    from PyQt5.QtWidgets import QApplication, QMainWindow, QPushButton, QVBoxLayout, QWidget
     import sys
+
     class MainWindow(QMainWindow):
         def __init__(self):
+            print("Entering MainWindow.__init__")
             super().__init__()
             self.setWindowTitle("Image Annotation Tool")
             self.setGeometry(100, 100, 800, 600)
 
+            central_widget = QWidget()
+            self.setCentralWidget(central_widget)
+            layout = QVBoxLayout(central_widget)
+
             self.annotation_widget = AnnotationWidget()
-            self.setCentralWidget(self.annotation_widget)
-            
-            # Charger l'image d'exemple
-            self.annotation_widget.load_image("test/candidates/2024-08-02_19-33-47.650549.jpg")
+            layout.addWidget(self.annotation_widget)
 
-            # Ajouter une annotation de type point
-            self.annotation_widget.load_annotations([('point', 100, 100, None, None)])
+            change_image_button = QPushButton("Change Image")
+            change_image_button.clicked.connect(self.change_image)
+            layout.addWidget(change_image_button)
 
+            add_annotation_button = QPushButton("Add Annotation")
+            add_annotation_button.clicked.connect(self.add_annotation)
+            layout.addWidget(add_annotation_button)
+
+            self.image_index = 0
+            self.images = [
+                "test/candidates/2024-08-02_19-33-47.650549.jpg",
+                "test/candidates/2024-03-26_11-25-00.128252.jpg"
+            ]
+            print("Exiting MainWindow.__init__")
+
+        def change_image(self):
+            print("Entering change_image")
+            self.annotation_widget.cleanup()
+            self.image_index = (self.image_index + 1) % len(self.images)
+            self.annotation_widget.load_image(self.images[self.image_index])
+            print(f"Changed to image: {self.images[self.image_index]}")
+            print("Exiting change_image")
+
+        def add_annotation(self):
+            print("Entering add_annotation")
+            annotations = self.annotation_widget.get_annotations()
+            new_annotation = ('point', 100 + len(annotations) * 50, 100, None, None)
+            annotations.append(new_annotation)
+            self.annotation_widget.load_annotations(annotations)
+            print(f"Added annotation: {new_annotation}")
+            print("Exiting add_annotation")
+
+    print("Starting application")
     app = QApplication(sys.argv)
     window = MainWindow()
     window.show()
+    print("Entering event loop")
     sys.exit(app.exec_())
