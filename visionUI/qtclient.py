@@ -254,7 +254,7 @@ class App(QApplication):
         self.form.keyframesList.selectionModel().selectionChanged.connect(self.keyframe_image_select)
         self.form.newClassButton.clicked.connect(self.create_new_class)
         self.form.deleteClassButton.clicked.connect(self.remove_class)
-        self.form.deletePointButton.clicked.connect(self.remove_annotation)
+        # self.form.deletePointButton.clicked.connect(self.remove_annotation)
         self.form.validateKFButton.clicked.connect(self.validate_keyframe)
         self.form.invalidateKFButton.clicked.connect(self.invalidate_keyframe)
         self.form.prepareDatasetButton.clicked.connect(self.prepare_training_files)
@@ -267,7 +267,7 @@ class App(QApplication):
         shortcut = QShortcut(self.window)
         shortcut.setKey(QKeySequence("Del"))
         shortcut.setContext(Qt.ApplicationShortcut)
-        shortcut.activated.connect(self.remove_annotation)
+        # shortcut.activated.connect(self.remove_annotation)
 
         shortcut = QShortcut(self.window)
         shortcut.setKey(QKeySequence("M"))

@@ -1,6 +1,6 @@
 import os
 import json
-from PyQt5.QtWidgets import QApplication, QWidget, QVBoxLayout, QHBoxLayout, QListWidget, QLabel, QPushButton, QFileDialog, QInputDialog, QMessageBox
+from PyQt5.QtWidgets import QApplication, QWidget, QVBoxLayout, QHBoxLayout, QListWidget, QLabel, QPushButton, QFileDialog, QInputDialog, QMessageBox, QSplitter, QMenuBar, QAction
 from PyQt5.QtCore import Qt, QSettings, pyqtSignal
 from annotation_gui import AnnotationWidget
 from database import DatabaseManager
@@ -16,11 +16,10 @@ Design decisions and constraints:
 2. Integrate AnnotationWidget for image display and annotation.
 3. Use the Database class for all database interactions.
 4. Implement a single-window interface with a split view: image list on the left, annotation widget on the right.
-5. Display dataset info at the top of the window.
-6. Provide separate tabs or sections for candidate and keyframe images.
-7. Allow users to open a dataset folder through a file dialog.
-8. Remember and automatically open the last used dataset.
-9. Allow creating new datasets and importing images.
+5. Provide checkable buttons for toggling between candidate and keyframe images.
+6. Allow users to open a dataset folder, create new datasets, and import images through a menu.
+7. Remember and automatically open the last used dataset.
+8. Include a resizable splitter between the left panel (image list) and the right panel (annotation widget) for flexible layout adjustment.
 
 The main class, DatasetExplorerGUI, inherits from QWidget and encapsulates all GUI-related functionality.
 """
@@ -32,7 +31,6 @@ class DatasetExplorerGUI(QWidget):
         super().__init__()
         self.dataset_path = None
         self.db_manager = None
-        self.dataset_info = None
         self.settings = QSettings("YourCompany", "DatasetExplorer")
         
         self.init_ui()
@@ -41,57 +39,105 @@ class DatasetExplorerGUI(QWidget):
     def init_ui(self):
         """Initialize the user interface"""
         self.setWindowTitle('Dataset Explorer')
-        self.setGeometry(100, 100, 1200, 800)  # Increased window size
+        self.setGeometry(100, 100, 1200, 800)
 
         main_layout = QVBoxLayout()
 
-        # Dataset info section
-        self.info_label = QLabel('No dataset loaded')
-        main_layout.addWidget(self.info_label)
+        # Menu bar
+        self.create_menu()
 
-        # Main content area
-        content_layout = QHBoxLayout()
+        # Main content area with splitter
+        self.splitter = QSplitter(Qt.Horizontal)
+
+        # Left panel: toggle buttons and image list
+        left_widget = QWidget()
+        left_layout = QVBoxLayout(left_widget)
+
+        # Toggle buttons
+        toggle_layout = QHBoxLayout()
+        self.candidates_button = QPushButton('Show Candidates')
+        self.candidates_button.setCheckable(True)
+        self.candidates_button.setChecked(True)
+        self.candidates_button.clicked.connect(self.toggle_candidates)
+        toggle_layout.addWidget(self.candidates_button)
+
+        self.keyframes_button = QPushButton('Show Keyframes')
+        self.keyframes_button.setCheckable(True)
+        self.keyframes_button.clicked.connect(self.toggle_keyframes)
+        toggle_layout.addWidget(self.keyframes_button)
+
+        left_layout.addLayout(toggle_layout)
 
         # Image list
         self.image_list = QListWidget()
         self.image_list.itemClicked.connect(self.on_image_selected)
-        content_layout.addWidget(self.image_list, 1)
+        self.image_list.currentItemChanged.connect(self.on_image_selected)  # Add this line
+        left_layout.addWidget(self.image_list)
+
+        self.splitter.addWidget(left_widget)
 
         # Annotation widget
         self.annotation_widget = AnnotationWidget()
         self.annotation_widget.annotation_changed.connect(self.save_annotations)
-        content_layout.addWidget(self.annotation_widget, 1)  # Use stretch factor to give it more space
+        self.splitter.addWidget(self.annotation_widget)
 
-        main_layout.addLayout(content_layout)
+        # Set initial sizes for splitter (adjust as needed)
+        self.splitter.setSizes([400, 800])
 
-        # Controls
-        controls_layout = QHBoxLayout()
-        load_button = QPushButton('Load Dataset')
-        load_button.clicked.connect(self.load_dataset)
-        controls_layout.addWidget(load_button)
-        
-        self.toggle_button = QPushButton('Show Candidates')
-        self.toggle_button.clicked.connect(self.toggle_image_list)
-        controls_layout.addWidget(self.toggle_button)
-
-        create_button = QPushButton('Create New Dataset')
-        create_button.clicked.connect(self.create_new_dataset)
-        controls_layout.addWidget(create_button)
-
-        import_button = QPushButton('Import Images')
-        import_button.clicked.connect(self.import_images)
-        controls_layout.addWidget(import_button)
-
-        save_button = QPushButton('Save Annotations')
-        save_button.clicked.connect(self.save_annotations)
-        controls_layout.addWidget(save_button)
-
-        main_layout.addLayout(controls_layout)
+        main_layout.addWidget(self.splitter)
 
         self.setLayout(main_layout)
 
         # Connect the dataset_changed signal to update the UI
         self.dataset_changed.connect(self.update_ui)
+
+    def create_menu(self):
+        menubar = QMenuBar(self)
+        
+        # Menu
+        main_menu = menubar.addMenu('Menu')
+        
+        load_action = QAction('Load Dataset', self)
+        load_action.triggered.connect(self.load_dataset)
+        main_menu.addAction(load_action)
+        
+        create_action = QAction('Create New Dataset', self)
+        create_action.triggered.connect(self.create_new_dataset)
+        main_menu.addAction(create_action)
+        
+        import_action = QAction('Import Images', self)
+        import_action.triggered.connect(self.import_images)
+        main_menu.addAction(import_action)
+        
+        import_old_db_action = QAction('Import Old DB', self)
+        import_old_db_action.triggered.connect(self.import_old_db)
+        main_menu.addAction(import_old_db_action)
+
+    def toggle_candidates(self):
+        if self.candidates_button.isChecked():
+            self.keyframes_button.setChecked(False)
+            self.load_candidate_images()
+
+    def toggle_keyframes(self):
+        if self.keyframes_button.isChecked():
+            self.candidates_button.setChecked(False)
+            self.load_keyframe_images()
+
+    def load_candidate_images(self):
+        self.image_list.clear()
+        if self.db_manager:
+            candidates = self.db_manager.get_candidate_images()
+            sorted_candidates = sorted(candidates, key=lambda img: img.path.lower())
+            for img in sorted_candidates:
+                self.image_list.addItem(img.path)
+
+    def load_keyframe_images(self):
+        self.image_list.clear()
+        if self.db_manager:
+            keyframes = self.db_manager.get_keyframe_images()
+            sorted_keyframes = sorted(keyframes, key=lambda img: img.path.lower())
+            for img in sorted_keyframes:
+                self.image_list.addItem(img.path)
 
     def load_last_dataset(self):
         """Load the last opened dataset if available"""
@@ -106,67 +152,30 @@ class DatasetExplorerGUI(QWidget):
         if path:
             self.dataset_path = path
             self.db_manager = DatabaseManager(os.path.join(self.dataset_path, 'dataset.db'))
-            self.point_file_path = os.path.join(self.dataset_path, 'point.json')
-            
-            self._load_dataset_info()
             self.dataset_changed.emit(self.dataset_path)
             self.settings.setValue("last_dataset", self.dataset_path)
 
-    def _load_dataset_info(self):
-        """Load dataset information from the point.json file"""
-        with open(self.point_file_path, 'r') as f:
-            self.dataset_info = json.load(f)
-
     def update_ui(self):
         """Update the UI with dataset information"""
-        self._update_info_label()
         self.load_candidate_images()
 
-    def _update_info_label(self):
-        """Update the info label with dataset information"""
-        if self.dataset_info:
-            info_text = f"Dataset: {os.path.basename(self.dataset_path)}\n"
-            info_text += f"Total images: {self.dataset_info.get('total_images', 'N/A')}\n"
-            info_text += f"Classes: {', '.join(self.dataset_info.get('classes', []))}"
-            self.info_label.setText(info_text)
-
-    def load_candidate_images(self):
-        """Load and display the list of candidate images"""
-        self.image_list.clear()
-        if self.db_manager:
-            candidates = self.db_manager.get_candidate_images()
-            print(f"Found {len(candidates)} candidate images")  # Débogage
-            for img in candidates:
-                print(f"Adding image: {img.path}")  # Débogage
-                self.image_list.addItem(img.path)
-        else:
-            print("Database manager is not initialized")  # Débogage
-        self.toggle_button.setText('Show Keyframes')
-
-    def load_keyframe_images(self):
-        """Load and display the list of keyframe images"""
-        self.image_list.clear()
-        keyframes = self.db_manager.get_keyframe_images()
-        for img in keyframes:
-            self.image_list.addItem(img.path)
-        self.toggle_button.setText('Show Candidates')
-
-    def toggle_image_list(self):
-        """Toggle between displaying candidate and keyframe images"""
-        if self.toggle_button.text() == 'Show Keyframes':
-            self.load_keyframe_images()
-        else:
-            self.load_candidate_images()
-
     def on_image_selected(self, item):
+        if item is None:
+            return
+        
         image_path = item.text()
         self.current_image = image_path
         full_path = os.path.join(self.dataset_path, image_path)
         self.annotation_widget.load_image(full_path)
         
-        # Charger les annotations existantes
+        # Load existing annotations
         annotations = self.db_manager.get_image_annotations(image_path)
         self.annotation_widget.load_annotations(annotations)
+        
+        # Print the loaded annotations
+        print(f"Loaded annotations for {image_path}:")
+        for ann in annotations:
+            print(f"  {ann}")
 
     def create_new_dataset(self):
         """Create a new dataset with a given name"""
@@ -182,14 +191,6 @@ class DatasetExplorerGUI(QWidget):
                     
                     db_path = os.path.join(dataset_path, 'dataset.db')
                     DatabaseManager.create_database(db_path)
-                    
-                    point_data = {
-                        "name": name,
-                        "total_images": 0,
-                        "classes": []
-                    }
-                    with open(os.path.join(dataset_path, 'point.json'), 'w') as f:
-                        json.dump(point_data, f)
                     
                     QMessageBox.information(self, "Success", f"Dataset '{name}' created successfully!")
                     self.load_dataset(dataset_path)
@@ -221,6 +222,10 @@ class DatasetExplorerGUI(QWidget):
         if self.db_manager:
             self.db_manager.close()
         event.accept()
+
+    def import_old_db(self):
+        # Cette fonction sera implémentée plus tard
+        pass
 
 # Example usage
 if __name__ == '__main__':

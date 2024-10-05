@@ -37,6 +37,8 @@ class AnnotationItem(QGraphicsItem):
         self.data = data
         self.color = color
         self.setFlag(QGraphicsItem.ItemIsMovable)
+        if self.item_type == "point":
+            self.setPos(data)
 
     def boundingRect(self):
         if self.item_type == "point":
@@ -282,11 +284,11 @@ class AnnotationWidget(QWidget):
                 self.scene.removeItem(item)
         for ann_type, x1, y1, x2, y2 in annotations:
             if ann_type == 'point':
-                item = AnnotationItem("point", QPointF(int(x1), int(y1)))
+                item = AnnotationItem("point", QPointF(x1, y1))
             elif ann_type == 'line':
-                item = AnnotationItem("line", [QPointF(int(x1), int(y1)), QPointF(int(x2), int(y2))])
+                item = AnnotationItem("line", [QPointF(x1, y1), QPointF(x2, y2)])
             elif ann_type == 'rectangle':
-                item = AnnotationItem("rectangle", [QPointF(int(x1), int(y1)), QPointF(int(x2), int(y2))])
+                item = AnnotationItem("rectangle", [QPointF(x1, y1), QPointF(x2, y2)])
             self.scene.addItem(item)
 
     def get_annotations(self):
@@ -319,6 +321,9 @@ if __name__ == "__main__":
             
             # Charger l'image d'exemple
             self.annotation_widget.load_image("test/candidates/2024-08-02_19-33-47.650549.jpg")
+
+            # Ajouter une annotation de type point
+            self.annotation_widget.load_annotations([('point', 100, 100, None, None)])
 
     app = QApplication(sys.argv)
     window = MainWindow()

@@ -95,7 +95,6 @@ class DatabaseManager:
                 session.add(new_image)
                 session.commit()
                 session.refresh(new_image)
-                print(f"Added new image: {new_image}")  # Débogage
                 return new_image
             except IntegrityError:
                 # Si l'image existe déjà, faites une mise à jour
@@ -108,7 +107,6 @@ class DatabaseManager:
                     existing_image.is_test = is_test
                     session.commit()
                     session.refresh(existing_image)
-                    print(f"Updated existing image: {existing_image}")  # Débogage
                     return existing_image
                 else:
                     print(f"Failed to add or update image: {path}")  # Débogage
@@ -141,10 +139,13 @@ class DatabaseManager:
             image = session.query(Image).filter_by(path=image_path).first()
             if image:
                 annotations = session.query(Annotation).filter_by(image_id=image.id).all()
-                return [
+                ret = [
                     (ann.type, ann.x1, ann.y1, ann.x2, ann.y2)
                     for ann in annotations
                 ]
+                print(ret)
+                return ret
+            print(f"No annotations found for image: {image_path}")
             return []
 
     def get_candidate_images(self):
@@ -159,7 +160,9 @@ class DatabaseManager:
 
     def get_image_by_path(self, path):
         with self.SessionLocal() as session:
-            return session.query(Image).filter_by(path=path).first()
+            # Normalize the path to handle both absolute and relative paths
+            normalized_path = os.path.normpath(path)
+            return session.query(Image).filter(Image.path.like(f"%{normalized_path}")).first()
 
     def import_images(self, source_dir, destination_dir):
         imported_count = 0
