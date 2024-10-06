@@ -2,7 +2,7 @@ import os
 import json
 from PyQt5.QtWidgets import QApplication, QWidget, QVBoxLayout, QHBoxLayout, QListWidget, QLabel, QPushButton, QFileDialog, QInputDialog, QMessageBox, QSplitter, QMenuBar, QAction
 from PyQt5.QtCore import Qt, QSettings, pyqtSignal
-from annotation_gui import AnnotationWidget
+from annotation import AnnotationWidget
 from database import DatabaseManager
 import faulthandler
 faulthandler.enable()
