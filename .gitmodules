@@ -1,3 +1,6 @@
 [submodule "ivlib"]
 	path = ivlib
 	url = git@github.com:yquemener/ivlib.git
+[submodule "visionAI/yolov5"]
+	path = visionAI/yolov5
+	url = https://github.com/ultralytics/yolov5.git
